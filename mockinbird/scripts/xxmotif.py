@@ -50,6 +50,7 @@ Example::
 """
 import argparse
 import os
+import sys
 import shutil
 from mockinbird.utils import argparse_helper as aph
 from mockinbird.utils import execute
@@ -96,6 +97,10 @@ def run():
     file_prefix = prefix_pat % (args.prefix, args.start, args.stop, args.width, args.key)
 
     sites = ParclipSiteContainer.from_file(args.inputfile)
+
+    if len(sites) == 0:
+        print('No PAR-CLIP sites found. Cannot run motif analysis.', file=sys.stderr)
+        return
 
     if args.filterGFF != '':
         sites.remove_gff_sites(args.filterGFF, args.awidth)
