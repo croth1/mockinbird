@@ -60,7 +60,7 @@ def getCountMat(file_pileup, minCoverage, verbose):
             for line in infile:
                 lines += 1
 
-    mat = [[0] * 4, [0] * 4, [0] * 4, [0] * 4]
+    mat = [[1] * 4, [1] * 4, [1] * 4, [1] * 4]
     with open(file_pileup) as file_pileup:
         count = 0
         percent_old = 0
