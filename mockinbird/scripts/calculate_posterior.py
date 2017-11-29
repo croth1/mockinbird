@@ -262,7 +262,10 @@ def main():
         # heuristic to stop the elimination of k=1 sites
         # if k_mock <= 1:
         #     qk_prime = qk_prime + 0.01
-        f_knots_bf_kk = (f_knots / (1 - qk_prime)) - 1
+        if 1 - qk_prime < 1e-12:
+            f_knots_bf_kk = f_knots * 0
+        else:
+            f_knots_bf_kk = (f_knots / (1 - qk_prime)) - 1
 
         def p_pval_z1(x_knots, f_knots):
             @lru_cache(maxsize=2**15)
@@ -298,7 +301,10 @@ def main():
         qk = 1 - np.min(f_knots)
         qk_store[k] = qk
 
-        f_knots_bf_nk = (f_knots / (1 - qk)) - 1
+        if 1 - qk < 1e-12:
+            f_knots_bf_nk = f_knots * 0
+        else:
+            f_knots_bf_nk = (f_knots / (1 - qk)) - 1
 
         def p_pval_z1(x_knots, f_knots):
             @lru_cache(maxsize=2**15)
@@ -332,7 +338,10 @@ def main():
             pval_n = pval_nk(n_factor, k_factor) / pval_nk_scaling_factors[k_factor_lump]
             BF_n = n_k_fits[k_factor_lump](pval_n)
 
-            BF = BF_k * BF_n * (1 - qk_store[k_factor_lump]) / qk_store[k_factor_lump]
+            if 1 - qk_store[k_factor_lump] < 1e-12:
+                BF = 0
+            else:
+                BF = BF_k * BF_n * (1 - qk_store[k_factor_lump]) / qk_store[k_factor_lump]
             posterior = BF / (1 + BF)
             toks.extend([BF_k, BF_n, pval_k, pval_n, posterior])
             print(*toks, sep='\t', file=outfile)
