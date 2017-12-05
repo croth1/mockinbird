@@ -1,6 +1,8 @@
 import argparse
 import os
+import sys
 from multiprocessing import Pool
+import logging
 
 import numpy as np
 import pandas as pd
@@ -9,6 +11,13 @@ from mockinbird.utils import execute
 from mockinbird.utils.argparse_helper import file_r, dir_rwx
 from mockinbird.utils.helper_objects import ParclipSiteContainer
 from mockinbird.utils.parsers import GFF3Parser
+from mockinbird import LOG_DEFAULT_FORMAT
+
+logger = logging.getLogger()
+formatter = logging.Formatter(LOG_DEFAULT_FORMAT)
+console_handler = logging.StreamHandler(stream=sys.stdout)
+console_handler.setFormatter(formatter)
+logger.addHandler(console_handler)
 
 
 def create_parser():
@@ -54,6 +63,7 @@ def create_parser():
     parser.add_argument('--n_processes', help=n_proc_help, default=4, type=int)
     return parser
 
+
 global data_dict
 
 
@@ -79,6 +89,10 @@ def main():
         for rec in parser.parse():
             if args.min_ts_len <= rec.end - rec.start + 1 <= args.max_ts_len:
                 gff_records.append(rec)
+    if len(gff_records) == 0:
+        print('Could not read any transcripts. Please check the format of the GFF file.',
+              file=sys.stderr)
+        sys.exit(1)
 
     cut_len = args.downstream_bp + args.upstream_bp + 2 * args.gene_bp + 2
 

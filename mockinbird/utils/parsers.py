@@ -45,19 +45,26 @@ class GFF3Parser:
         self._handle = handle
 
     def parse(self):
-        for line in self._handle:
+        for i, line in enumerate(self._handle):
             if line.startswith('#'):
                 continue
             line = line.strip()
             tokens = line.split('\t')
+            if len(tokens) == 8:
+                tokens.append('.')
             if len(tokens) != 9:
+                logger.warn('gff parser: unexpected number of tokens in line %s. Skipping.', i)
                 continue
             values = []
             for value, field_type in zip(tokens, GFF_FIELD_TYPES):
                 if value == '.':
                     values.append(None)
                 else:
-                    values.append(field_type(value))
+                    try:
+                        values.append(field_type(value))
+                    except ValueError:
+                        logger.warn('gff parser: unexpected value %r in line %s. Skipping.', value, i)
+                        continue
             yield GFFRecord(*values)
 
     def write_record(self, record, **repl):
