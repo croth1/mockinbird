@@ -3,6 +3,7 @@ import os
 import sys
 import json
 from functools import lru_cache
+from collections import defaultdict
 import pickle
 
 import matplotlib as mpl
@@ -13,9 +14,9 @@ import pandas as pd
 import numpy as np
 from scipy.special import binom
 from scipy.interpolate import interp1d
+from scipy.integrate import quad
 
-from mockinbird.utils.grenander import pval_grenander_fit
-from mockinbird.utils.grenander import plot_cumul_density
+from mockinbird.utils.grenander import discrete_pval_grenander_fit
 from mockinbird.utils.fit_betabinom import p_kn_wrapper
 
 
@@ -140,6 +141,7 @@ def main():
         mock_model = pickle.load(model_file)
 
     df = pd.read_table(args.factor_mock_table)
+    input_df_cols = [str(col) for col in df.columns]
     with open(args.bam_statistics_json) as json_handle:
         bam_statistics = json.load(json_handle)
 
@@ -195,11 +197,15 @@ def main():
         fig.savefig(out_file)
         plt.close()
 
-    def plot_pval_ecdf(pvals, plot_file, title):
+    def plot_pval_ecdf(x_ecdf, y_ecdf, x_lcm, y_lcm, plot_file, title):
         if not args.plot_dir:
             return
         out_file = os.path.join(args.plot_dir, plot_file)
-        plot_cumul_density(pvals, out_file, title)
+        fig, ax = plt.subplots()
+        ax.plot(x_ecdf, y_ecdf, 'o')
+        ax.plot(x_lcm, y_lcm)
+        fig.savefig(out_file)
+        plt.close()
 
     max_k_mock = args.max_k_mock
     mock_cov = mock_model['coverage']
@@ -237,114 +243,136 @@ def main():
     pn_k = p_nk_wrapper(p_kn, p_n, norm)
     pval_nk = pval_nk_wrapper(pn_k)
 
-    k_kmock_fits = {}
-    pval_kk_scaling_factors = {}
-    for k_mock, kmock_df in df.groupby('k_mock'):
-        if k_mock > max_k_mock:
-            continue
-        pvals = []
-        for k_factor in kmock_df.k_factor:
-            pvals.append(pval_k_k_mock(k_factor, k_mock))
-        pvals = np.array(pvals)
+    PVAL_INT_FACTOR = 1e9
+    # calculate p-values
+    pvals_nk = []
+    pvals_kk = []
+    for idx, row in df.iterrows():
+        pvals_kk.append(int(pval_k_k_mock(row.k_factor, row.k_mock) * PVAL_INT_FACTOR))
+        pvals_nk.append(int(pval_nk(row.n_factor, row.k_factor) * PVAL_INT_FACTOR))
+    df['pval_kk'] = pvals_kk
+    df['pval_nk'] = pvals_nk
 
-        if args.scale_pvalues:
-            pval_kk_scaling_factor = pvals.max()
-        else:
-            pval_kk_scaling_factor = 1
-
-        pval_kk_scaling_factors[k_mock] = pval_kk_scaling_factor
-        pvals = pvals / pval_kk_scaling_factor
-
-        x_knots, f_knots = pval_grenander_fit(pvals)
-        plot_pval_ecdf(pvals, 'ecdf_kk%s' % k_mock, 'k_mock=%s' % k_mock)
-        qk_prime = 1 - np.min(f_knots)
-
-        # heuristic to stop the elimination of k=1 sites
-        # if k_mock <= 1:
-        #     qk_prime = qk_prime + 0.01
-        if 1 - qk_prime < 1e-12:
-            f_knots_bf_kk = f_knots * 0
-        else:
-            f_knots_bf_kk = (f_knots / (1 - qk_prime)) - 1
-
-        def p_pval_z1(x_knots, f_knots):
-            @lru_cache(maxsize=2**15)
-            def f(pval):
-                return interp1d(x_knots, f_knots, kind='zero')(pval)
-            return f
-        dens_fun = p_pval_z1(x_knots, f_knots_bf_kk)
-        plot_pval_density(dens_fun, 'pval_kk%s_bf.pdf' % k_mock)
-        k_kmock_fits[k_mock] = dens_fun
-
+    # renormalize p-values
+    PVALUE_EPSILON = 1e-9
     k_lump = 10
     df.loc[:, 'k_lump'] = df.k_factor
     df.loc[df.k_lump >= k_lump, 'k_lump'] = k_lump
+
+    for k_mock, kmock_df in df.groupby('k_mock'):
+        if k_mock > max_k_mock:
+            continue
+        pvals = kmock_df.pval_kk + PVAL_INT_FACTOR * PVALUE_EPSILON
+        pvals_int = ((pvals / pvals.max()) * PVAL_INT_FACTOR).astype(int)
+        df.loc[kmock_df.index, 'pval_kk'] = pvals_int
+
+    for k, k_df in df.groupby('k_lump'):
+        pvals = k_df.pval_nk + PVAL_INT_FACTOR * PVALUE_EPSILON
+        pvals_int = ((pvals / pvals.max()) * PVAL_INT_FACTOR).astype(int)
+        df.loc[k_df.index, 'pval_nk'] = pvals_int
+
+
+    k_kmock_fits = {}
+    for k_mock, kmock_df in df.groupby('k_mock'):
+        if k_mock > max_k_mock:
+            continue
+
+        pvals = kmock_df.pval_kk
+        pval_slope_map, ecdf_x, ecdf_y, x_knots, y_knots = discrete_pval_grenander_fit(
+                pvals, pval_scale=PVAL_INT_FACTOR, full_output=True)
+
+        plot_pval_ecdf(ecdf_x, ecdf_y, x_knots, y_knots, 'ecdf_kk%s' % k_mock,
+                       'k_mock=%s' % k_mock)
+
+        unique_pvals = np.unique(pvals)
+        pval_yknots = [pval_slope_map[pval] for pval in unique_pvals]
+        qk_prime = 1 - min(pval_yknots)
+        f_knots_bf_kk = (pval_yknots / (1 - qk_prime)) - 1
+
+        def p_pval_z1(x_knots, y_knots):
+            @lru_cache(maxsize=2**15)
+            def f(pval):
+                return interp1d(x_knots, y_knots, kind='zero', fill_value='extrapolate')(pval)
+            return f
+        dens_fun = p_pval_z1(unique_pvals, f_knots_bf_kk)
+        plot_pval_density(dens_fun, 'pval_kk%s_bf.pdf' % k_mock)
+        k_kmock_fits[k_mock] = pval_slope_map
+
     n_k_fits = {}
     qk_store = {}
-    pval_nk_scaling_factors = {}
+    eta0_pval_thresh = 0.9
     for k, k_df in df[df.n_factor > 0].groupby('k_lump'):
-        pvals = []
-        for n_factor, k_factor in zip(k_df.n_factor, k_df.k_factor):
-            pvals.append(pval_nk(n_factor, k_factor))
-        pvals = np.array(pvals)
+        pvals = k_df.pval_nk
 
-        if args.scale_pvalues:
-            pval_nk_scaling_factor = pvals.max()
-        else:
-            pval_nk_scaling_factor = 1
+        pval_slope_map, ecdf_x, ecdf_y, x_knots, y_knots = discrete_pval_grenander_fit(
+            pvals, pval_scale=PVAL_INT_FACTOR, full_output=True)
 
-        pval_nk_scaling_factors[k] = pval_nk_scaling_factor
-        pvals = pvals / pval_nk_scaling_factor
+        unique_pvals = np.unique(pvals)
+        pval_yknots = [pval_slope_map[pval] for pval in unique_pvals]
 
-        plot_pval_ecdf(pvals, 'ecdf_nk%s' % k, 'k=%s' % k)
-        x_knots, f_knots = pval_grenander_fit(pvals)
-        qk = 1 - np.min(f_knots)
+        # get a more robust eta0 estimation
+        def p_pval(x_knots, f_knots):
+            @lru_cache(maxsize=2**15)
+            def f(pval):
+                return interp1d(x_knots, f_knots, kind='zero', fill_value='extrapolate')(pval)
+            return f
+        dens_fun = p_pval(unique_pvals / PVAL_INT_FACTOR, pval_yknots)
+
+        integral, *_ = quad(dens_fun, eta0_pval_thresh, 1)
+        eta0 = integral / (1 - eta0_pval_thresh)
+
+        # redo the grenander fit, but this time contrain by the estimated eta0
+        pval_slope_map, ecdf_x, ecdf_y, x_knots, y_knots = discrete_pval_grenander_fit(
+            pvals, pval_scale=PVAL_INT_FACTOR, eta0=eta0, full_output=True)
+
+        unique_pvals = np.unique(pvals)
+        pval_yknots = [pval_slope_map[pval] for pval in unique_pvals]
+
+        qk = 1 - np.min(pval_yknots)  # == eta0
         qk_store[k] = qk
-
-        if 1 - qk < 1e-12:
-            f_knots_bf_nk = f_knots * 0
-        else:
-            f_knots_bf_nk = (f_knots / (1 - qk)) - 1
+        f_knots_bf_nk = (pval_yknots / (1 - qk)) - 1
 
         def p_pval_z1(x_knots, f_knots):
             @lru_cache(maxsize=2**15)
             def f(pval):
-                return interp1d(x_knots, f_knots, kind='zero')(pval)
+                return interp1d(x_knots, f_knots, kind='zero', fill_value='extrapolate')(pval)
             return f
-        dens_fun = p_pval_z1(x_knots, f_knots_bf_nk)
+        dens_fun = p_pval_z1(unique_pvals / PVAL_INT_FACTOR, f_knots_bf_nk)
+
+        plot_pval_ecdf(ecdf_x, ecdf_y, x_knots, y_knots, 'ecdf_nk%s' % k, 'k=%s' % k)
+
         plot_pval_density(dens_fun, 'pval_nk%s_bf.pdf' % k)
-        n_k_fits[k] = dens_fun
+        n_k_fits[k] = pval_slope_map
 
-    with open(args.factor_mock_table) as infile, open(args.outfile, 'w') as outfile:
-        header = infile.readline().split()
-        header.extend(['bf_kk', 'bf_nk', 'pval_kk', 'pval_nk', 'posterior'])
-        print(*header, sep='\t', file=outfile)
-        for line in infile:
-            toks = line.split()
-            chrom, pos, k_factor, n_factor, k_mock, n_mock, *_ = toks
-            k_factor = int(k_factor)
-            k_factor_lump = min(k_lump, k_factor)
-            n_factor = int(n_factor)
-            k_mock = int(k_mock)
+    posterior_data = defaultdict(list)
 
-            if k_factor == 0:
-                continue
+    df = df[(df.k_factor > 0) & (df.k_mock <= max_k_mock)]
 
-            if k_mock > max_k_mock:
-                continue
+    for idx, row in df.iterrows():
+        k_factor_lump = min(k_lump, row.k_factor)
 
-            pval_k = pval_k_k_mock(k_factor, k_mock) / pval_kk_scaling_factors[k_mock]
-            BF_k = k_kmock_fits[k_mock](pval_k)
-            pval_n = pval_nk(n_factor, k_factor) / pval_nk_scaling_factors[k_factor_lump]
-            BF_n = n_k_fits[k_factor_lump](pval_n)
+        BF_k = k_kmock_fits[row.k_mock][row.pval_kk]
+        BF_n = n_k_fits[k_factor_lump][row.pval_nk]
 
-            if 1 - qk_store[k_factor_lump] < 1e-12:
-                BF = 0
-            else:
-                BF = BF_k * BF_n * (1 - qk_store[k_factor_lump]) / qk_store[k_factor_lump]
+        # all predictions are positive
+        if qk_store[k_factor_lump] < 1e-20:
+            posterior = 1
+        else:
+            BF = BF_k * BF_n * (1 - qk_store[k_factor_lump]) / qk_store[k_factor_lump]
             posterior = BF / (1 + BF)
-            toks.extend([BF_k, BF_n, pval_k, pval_n, posterior])
-            print(*toks, sep='\t', file=outfile)
+
+        posterior_data['bf_kk'].append(BF_k)
+        posterior_data['bf_nk'].append(BF_n)
+        posterior_data['posterior'].append(posterior)
+
+    df['bf_kk'] = posterior_data['bf_kk']
+    df['bf_nk'] = posterior_data['bf_nk']
+    df['posterior'] = posterior_data['posterior']
+    df.loc[:, 'pval_kk'] /= PVAL_INT_FACTOR
+    df.loc[:, 'pval_nk'] /= PVAL_INT_FACTOR
+    
+    output_cols = input_df_cols + ['bf_kk', 'bf_nk', 'pval_kk', 'pval_nk', 'posterior']
+    df[output_cols].to_csv(args.outfile, sep='\t', index=False)
 
 
 if __name__ == '__main__':

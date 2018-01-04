@@ -69,6 +69,62 @@ def pval_grenander_fit(pvals):
     return x_knots, f_knots
 
 
+PVALUE_EPSILON = 1e-12
+
+
+def discrete_pval_grenander_fit(pvals, pval_scale=1, eta0=None, full_output=False):
+
+    x_bins, counts = np.unique(pvals, return_counts=True)
+    x_ecdf = x_bins / pval_scale
+    y_ecdf = counts.cumsum() / len(pvals)
+
+    x_bins = np.append(0, x_bins)
+    x_ecdf = np.append(0, x_ecdf)
+    y_ecdf = np.append(0, y_ecdf)
+
+    if eta0 is not None:
+        y_ecdf = np.minimum(y_ecdf, 1 - eta0 * (1 - x_ecdf))
+        y_ecdf = np.maximum(y_ecdf, eta0 * x_ecdf)
+
+    # calculate the least concave majorant (lcm)
+    # naive (?) implemenation:
+    # starting from (0,0) in ecdf, draw a line to the point p with the steepest slope connection
+    # repeat from point p, to p'' accoring to above criteria. Stop when (1,1) in ecdf is reached
+
+    x_knots = [x_ecdf[0]]
+    y_knots = [y_ecdf[0]]
+
+    pval_slopes = []
+
+    i = 0
+    max_i = len(x_ecdf)
+    while i < max_i - 1:
+        x_cur = x_ecdf[i]
+        y_cur = y_ecdf[i]
+        delta_x = x_ecdf[i + 1:] - x_cur
+        delta_y = y_ecdf[i + 1:] - y_cur
+
+        slopes = delta_y / delta_x
+        max_slope_index = np.argmax(slopes)
+        max_slope = slopes[max_slope_index]
+
+        jump_distance = 1 + max_slope_index
+        pval_slopes.extend([max_slope] * jump_distance)
+        i += jump_distance
+
+        x_knots.append(x_ecdf[i])
+        y_knots.append(y_ecdf[i])
+
+    input_slope_map = {}
+    for scaled_pval, slope in zip(x_bins[1:], pval_slopes):
+        input_slope_map[scaled_pval] = slope
+
+    if full_output:
+        return input_slope_map, x_bins, y_ecdf, np.array(x_knots), np.array(y_knots)
+    else:
+        return input_slope_map
+
+
 def plot_cumul_density(pvals, plot_basename, title):
     pval_vec = ro.FloatVector(pvals)
     ecdf_pkg.plot_ecdf_lcm(pval_vec, plot_basename + '.pdf', title)
