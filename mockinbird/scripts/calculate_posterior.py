@@ -3,7 +3,6 @@ import os
 import sys
 import json
 from functools import lru_cache
-from collections import defaultdict
 import pickle
 
 import matplotlib as mpl
@@ -23,6 +22,7 @@ from mockinbird.utils.fit_betabinom import p_kn_wrapper
 def create_parser():
     parser = argparse.ArgumentParser()
     parser.add_argument('factor_mock_table')
+    parser.add_argument('factor_mock_statistics')
     parser.add_argument('mock_model')
     parser.add_argument('--max_iter', type=int, default=100)
     parser.add_argument('outfile')
@@ -141,7 +141,6 @@ def main():
         mock_model = pickle.load(model_file)
 
     df = pd.read_table(args.factor_mock_table)
-    input_df_cols = [str(col) for col in df.columns]
     with open(args.bam_statistics_json) as json_handle:
         bam_statistics = json.load(json_handle)
 
@@ -243,72 +242,73 @@ def main():
     pn_k = p_nk_wrapper(p_kn, p_n, norm)
     pval_nk = pval_nk_wrapper(pn_k)
 
-    PVAL_INT_FACTOR = 1e9
     # calculate p-values
+    table_statistics = pd.read_table(args.factor_mock_statistics)
+    k_lump = 10
+    table_statistics.loc[:, 'k_lump'] = table_statistics.k_factor
+    table_statistics.loc[table_statistics.k_lump >= k_lump, 'k_lump'] = k_lump
+
     pvals_nk = []
     pvals_kk = []
-    for idx, row in df.iterrows():
-        pvals_kk.append(int(pval_k_k_mock(row.k_factor, row.k_mock) * PVAL_INT_FACTOR))
-        pvals_nk.append(int(pval_nk(row.n_factor, row.k_factor) * PVAL_INT_FACTOR))
+    for idx, row in table_statistics.iterrows():
+        pvals_kk.append(pval_k_k_mock(row.k_factor, row.k_mock))
+        pvals_nk.append(pval_nk(row.n_factor, row.k_factor))
     df['pval_kk'] = pvals_kk
     df['pval_nk'] = pvals_nk
 
-    # renormalize p-values
-    PVALUE_EPSILON = 1e-9
-    k_lump = 10
-    df.loc[:, 'k_lump'] = df.k_factor
-    df.loc[df.k_lump >= k_lump, 'k_lump'] = k_lump
-
-    for k_mock, kmock_df in df.groupby('k_mock'):
+    # set max(pval(k|k')) to 1
+    for k_mock, kmock_df in table_statistics.groupby('k_mock'):
         if k_mock > max_k_mock:
             continue
-        pvals = kmock_df.pval_kk + PVAL_INT_FACTOR * PVALUE_EPSILON
-        pvals_int = ((pvals / pvals.max()) * PVAL_INT_FACTOR).astype(int)
-        df.loc[kmock_df.index, 'pval_kk'] = pvals_int
+        pvals = kmock_df.pval_kk
+        table_statistics.loc[kmock_df.index, 'pval_kk'] = pvals / pvals.max()
 
-    for k, k_df in df.groupby('k_lump'):
-        pvals = k_df.pval_nk + PVAL_INT_FACTOR * PVALUE_EPSILON
-        pvals_int = ((pvals / pvals.max()) * PVAL_INT_FACTOR).astype(int)
-        df.loc[k_df.index, 'pval_nk'] = pvals_int
+    # set max(pval(n|k)) to 1
+    for k, k_df in table_statistics.groupby('k_lump'):
+        pvals = k_df.pval_nk
+        df.loc[k_df.index, 'pval_nk'] = pvals / pvals.max()
 
-
-    k_kmock_fits = {}
-    for k_mock, kmock_df in df.groupby('k_mock'):
+    # fit discrete grenander density estimations
+    for k_mock, kmock_df in table_statistics.groupby('k_mock'):
         if k_mock > max_k_mock:
             continue
 
         pvals = kmock_df.pval_kk
-        pval_slope_map, ecdf_x, ecdf_y, x_knots, y_knots = discrete_pval_grenander_fit(
-                pvals, pval_scale=PVAL_INT_FACTOR, full_output=True)
+        pval_freqs = kmock_df.count
+        sort_order = np.argsort(pvals)
+        pvals_sorted = pvals[sort_order]
+        freqs_sorted = pval_freqs[sort_order]
+
+        grenander_slopes, ecdf_x, ecdf_y, x_knots, y_knots = discrete_pval_grenander_fit(
+            pvals_sorted, freqs_sorted, full_output=True)
 
         plot_pval_ecdf(ecdf_x, ecdf_y, x_knots, y_knots, 'ecdf_kk%s' % k_mock,
                        'k_mock=%s' % k_mock)
 
-        unique_pvals = np.unique(pvals)
-        pval_yknots = [pval_slope_map[pval] for pval in unique_pvals]
-        qk_prime = 1 - min(pval_yknots)
-        f_knots_bf_kk = (pval_yknots / (1 - qk_prime)) - 1
+        qk_prime = 1 - min(grenander_slopes)
+        f_knots_bf_kk = (grenander_slopes / (1 - qk_prime)) - 1
 
         def p_pval_z1(x_knots, y_knots):
             @lru_cache(maxsize=2**15)
             def f(pval):
                 return interp1d(x_knots, y_knots, kind='zero', fill_value='extrapolate')(pval)
             return f
-        dens_fun = p_pval_z1(unique_pvals, f_knots_bf_kk)
+        dens_fun = p_pval_z1(pvals, f_knots_bf_kk)
         plot_pval_density(dens_fun, 'pval_kk%s_bf.pdf' % k_mock)
-        k_kmock_fits[k_mock] = pval_slope_map
+        table_statistics.loc[pvals_sorted.index, 'bf_kk'] = f_knots_bf_kk
 
-    n_k_fits = {}
     qk_store = {}
     eta0_pval_thresh = 0.9
-    for k, k_df in df[df.n_factor > 0].groupby('k_lump'):
+    for k, k_df in table_statistics[table_statistics.n_factor > 0].groupby('k_lump'):
+
         pvals = k_df.pval_nk
+        pval_freqs = kmock_df.count
+        sort_order = np.argsort(pvals)
+        pvals_sorted = pvals[sort_order]
+        freqs_sorted = pval_freqs[sort_order]
 
-        pval_slope_map, ecdf_x, ecdf_y, x_knots, y_knots = discrete_pval_grenander_fit(
-            pvals, pval_scale=PVAL_INT_FACTOR, full_output=True)
-
-        unique_pvals = np.unique(pvals)
-        pval_yknots = [pval_slope_map[pval] for pval in unique_pvals]
+        grenander_slopes, ecdf_x, ecdf_y, x_knots, y_knots = discrete_pval_grenander_fit(
+            pvals_sorted, freqs_sorted, full_output=True)
 
         # get a more robust eta0 estimation
         def p_pval(x_knots, f_knots):
@@ -316,63 +316,65 @@ def main():
             def f(pval):
                 return interp1d(x_knots, f_knots, kind='zero', fill_value='extrapolate')(pval)
             return f
-        dens_fun = p_pval(unique_pvals / PVAL_INT_FACTOR, pval_yknots)
+        dens_fun = p_pval(pvals_sorted, grenander_slopes)
 
         integral, *_ = quad(dens_fun, eta0_pval_thresh, 1)
         eta0 = integral / (1 - eta0_pval_thresh)
 
-        # redo the grenander fit, but this time contrain by the estimated eta0
-        pval_slope_map, ecdf_x, ecdf_y, x_knots, y_knots = discrete_pval_grenander_fit(
-            pvals, pval_scale=PVAL_INT_FACTOR, eta0=eta0, full_output=True)
+        # redo the grenander fit, but this time contrained by the estimated eta0
+        grenander_slopes, ecdf_x, ecdf_y, x_knots, y_knots = discrete_pval_grenander_fit(
+            pvals_sorted, freqs_sorted, eta0=eta0, full_output=True)
 
-        unique_pvals = np.unique(pvals)
-        pval_yknots = [pval_slope_map[pval] for pval in unique_pvals]
-
-        qk = 1 - np.min(pval_yknots)  # == eta0
+        qk = 1 - np.min(grenander_slopes)
         qk_store[k] = qk
-        f_knots_bf_nk = (pval_yknots / (1 - qk)) - 1
+        f_knots_bf_nk = (grenander_slopes / (1 - qk)) - 1
 
         def p_pval_z1(x_knots, f_knots):
             @lru_cache(maxsize=2**15)
             def f(pval):
                 return interp1d(x_knots, f_knots, kind='zero', fill_value='extrapolate')(pval)
             return f
-        dens_fun = p_pval_z1(unique_pvals / PVAL_INT_FACTOR, f_knots_bf_nk)
+        dens_fun = p_pval_z1(pvals_sorted, f_knots_bf_nk)
 
         plot_pval_ecdf(ecdf_x, ecdf_y, x_knots, y_knots, 'ecdf_nk%s' % k, 'k=%s' % k)
 
         plot_pval_density(dens_fun, 'pval_nk%s_bf.pdf' % k)
-        n_k_fits[k] = pval_slope_map
+        table_statistics.loc[pvals_sorted.index, 'bf_nk'] = f_knots_bf_nk
 
-    posterior_data = defaultdict(list)
+    table_statistics = table_statistics[
+        (table_statistics.k_factor > 0) & (table_statistics.k_mock <= max_k_mock)
+    ]
 
-    df = df[(df.k_factor > 0) & (df.k_mock <= max_k_mock)]
-
-    for idx, row in df.iterrows():
-        k_factor_lump = min(k_lump, row.k_factor)
-
-        BF_k = k_kmock_fits[row.k_mock][row.pval_kk]
-        BF_n = n_k_fits[k_factor_lump][row.pval_nk]
-
+    predictions = {}
+    for idx, row in table_statistics.iterrows():
         # all predictions are positive
-        if qk_store[k_factor_lump] < 1e-20:
+        if qk_store[row.k_lump] < 1e-20:
             posterior = 1
         else:
-            BF = BF_k * BF_n * (1 - qk_store[k_factor_lump]) / qk_store[k_factor_lump]
+            qk = qk_store[row.k_lump]
+            BF = row.bf_kk * row.bf_nk * (1 - qk) / qk
             posterior = BF / (1 + BF)
 
-        posterior_data['bf_kk'].append(BF_k)
-        posterior_data['bf_nk'].append(BF_n)
-        posterior_data['posterior'].append(posterior)
+        predictions[row.k_factor, row.n_factor, row.k_mock] = (
+            row.bf_kk, row.bf_nk, row.pval_kk, row.pval_nk, posterior
+        )
 
-    df['bf_kk'] = posterior_data['bf_kk']
-    df['bf_nk'] = posterior_data['bf_nk']
-    df['posterior'] = posterior_data['posterior']
-    df.loc[:, 'pval_kk'] /= PVAL_INT_FACTOR
-    df.loc[:, 'pval_nk'] /= PVAL_INT_FACTOR
-    
-    output_cols = input_df_cols + ['bf_kk', 'bf_nk', 'pval_kk', 'pval_nk', 'posterior']
-    df[output_cols].to_csv(args.outfile, sep='\t', index=False)
+        with open(args.factor_mock_table) as table,\
+                open(args.outfile, 'w') as outfile:
+            header = next(table).split()
+            header += ['bf_kk', 'bf_nk', 'pval_kk', 'pval_nk', 'posterior']
+            print(*header, sep='\t', file=outfile)
+
+            for line in table:
+                chrom, pos, k_factor, n_factor, k_mock, strand = line.split()
+                try:
+                    bf_kk, bf_nk, pval_kk, pval_nk, posterior = predictions[
+                        int(k_factor), int(n_factor), int(k_mock)
+                    ]
+                except KeyError:
+                    continue
+            print(chrom, pos, k_factor, n_factor, k_mock, strand, bf_kk, bf_nk,
+                  pval_kk, pval_nk, posterior, sep='\t', file=outfile)
 
 
 if __name__ == '__main__':

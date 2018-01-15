@@ -72,13 +72,11 @@ def pval_grenander_fit(pvals):
 PVALUE_EPSILON = 1e-12
 
 
-def discrete_pval_grenander_fit(pvals, pval_scale=1, eta0=None, full_output=False):
+def discrete_pval_grenander_fit(pvals, pval_freqs, eta0=None, full_output=False):
 
-    x_bins, counts = np.unique(pvals, return_counts=True)
-    x_ecdf = x_bins / pval_scale
-    y_ecdf = counts.cumsum() / len(pvals)
+    x_ecdf = pvals
+    y_ecdf = pval_freqs.cumsum() / len(pval_freqs)
 
-    x_bins = np.append(0, x_bins)
     x_ecdf = np.append(0, x_ecdf)
     y_ecdf = np.append(0, y_ecdf)
 
@@ -115,14 +113,12 @@ def discrete_pval_grenander_fit(pvals, pval_scale=1, eta0=None, full_output=Fals
         x_knots.append(x_ecdf[i])
         y_knots.append(y_ecdf[i])
 
-    input_slope_map = {}
-    for scaled_pval, slope in zip(x_bins[1:], pval_slopes):
-        input_slope_map[scaled_pval] = slope
+    grenander_slopes = np.array(pval_slopes)
 
     if full_output:
-        return input_slope_map, x_bins, y_ecdf, np.array(x_knots), np.array(y_knots)
+        return grenander_slopes, x_ecdf, y_ecdf, np.array(x_knots), np.array(y_knots)
     else:
-        return input_slope_map
+        return grenander_slopes
 
 
 def plot_cumul_density(pvals, plot_basename, title):
