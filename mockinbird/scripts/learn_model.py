@@ -27,22 +27,27 @@ def create_parser():
     return parser
 
 
-def plot_fit(k_vals, w, a, title, file_name, out_dir):
+def plot_fit(x, x_weights, w, a, title, file_name, out_dir, max_x=None):
 
     def geom_distr(k, w, a):
         return np.sum(w * (a / (1 + a) ** (k + 1)))
 
-    fit = [geom_distr(k, w, a) for k in range(np.max(k_vals) + 1)]
+    if max_x:
+        bins = int(x.max())
+
+    fit = [geom_distr(k, w, a) for k in range(np.max(x) + 1)]
     fit = np.array(fit)
     fig, ax = plt.subplots()
-    ax.hist(k_vals, log=True, bins=50, normed=True, alpha=0.5)
+    ax.hist(x, weights=x_weights, log=True, bins=bins, normed=True, alpha=0.5)
     ax.plot(fit, color='red')
+    if max_x:
+        ax.set_xlim((0, max_x))
     fig.suptitle(title, fontsize=18)
     fname = os.path.join(out_dir, file_name)
     plt.savefig(fname)
 
 
-def geom_mm_fit_fast(x, n_components, n_iter=100):
+def geom_mm_fit_fast(x, x_counts, n_components, n_iter=100):
     # unfortunately this time I parameterized with p = (1-q). Shame on me.
     weights = [0.01, 0.99]
     x_mean = np.mean(x)
@@ -54,17 +59,12 @@ def geom_mm_fit_fast(x, n_components, n_iter=100):
     p_max = 1 - q_max
 
     p_initial = [p_mean, p_mean + 0.05 * p_mean]
-
     for m in range(3, n_components):
-        p_initial.append(p_max)
-        weights = np.hstack((weights, [0.01]))
+        p_initial.append(p_max + 0.01 * m * p_max)
+        weights = np.hstack((weights, [0.0001]))
         weights /= np.sum(weights)
-        ps, weights = fast_geom_mm_fit(x, p_initial, weights, n_iter=5)
-    p_initial.append(p_max)
-    weights = np.hstack((weights, [0.01]))
-    weights /= np.sum(weights)
 
-    ps, weights = fast_geom_mm_fit(x, p_initial, weights, n_iter=n_iter)
+    ps, weights = fast_geom_mm_fit(x, p_initial, weights, n_iter=n_iter, weights=x_counts)
     w_m = np.array(weights)
     g_m = np.array([1 - p for p in ps])
     g_m = (1 - g_m) / g_m
@@ -81,9 +81,16 @@ def main():
         bam_stat = json.load(bam_json)
 
     mock_table = pd.read_table(args.transition_table,
-                               usecols=['n_mock', 'k_mock'])
-    k_vals = mock_table.k_mock
-    n_vals = mock_table.n_mock
+                               usecols=['n_mock', 'k_mock', 'count'])
+
+    k_collapsed = mock_table.groupby('k_mock').agg({'count': sum}).reset_index()
+    k_vals = k_collapsed.k_mock
+    k_counts = k_collapsed['count']
+
+    n_collapsed = mock_table.groupby('n_mock').agg({'count': sum}).reset_index()
+    n_vals = n_collapsed.n_mock
+    n_counts = n_collapsed['count']
+
     coverage = bam_stat['total_coverage']
 
     parameters = {}
@@ -92,33 +99,33 @@ def main():
 
     # fit p(k|z=0)
     logger.info('Fitting p(k)')
-    pw_m, g_m = geom_mm_fit_fast(k_vals, args.max_mixture_components, args.n_iterations)
-    plot_fit(k_vals, pw_m, g_m, 'p(k)', 'pk_fit', args.out_dir)
+    pw_m, g_m = geom_mm_fit_fast(k_vals, k_counts, args.max_mixture_components, args.n_iterations)
+    plot_fit(k_vals, k_counts, pw_m, g_m, 'p(k)', 'pk_fit', args.out_dir, max_x=25)
     pg_m = coverage * g_m
     parameters['pk_params'] = pw_m, pg_m
 
     # fit p(n)
-    w, g = geom_mm_fit_fast(n_vals, args.max_mixture_components, args.n_iterations)
-    plot_fit(n_vals, w, g, 'p(n)', 'pn_fit', args.out_dir)
+    w, g = geom_mm_fit_fast(n_vals, n_counts, args.max_mixture_components, args.n_iterations)
+    plot_fit(n_vals, n_counts, w, g, 'p(n)', 'pn_fit', args.out_dir, max_x=400)
     pg = coverage * g
     parameters['pn_params'] = w, pg
 
     if not args.no_global_fit:
-        tab = mock_table[['k_mock', 'n_mock']]
-        agg_counts = tab.groupby(['k_mock', 'n_mock']).agg(len)
-        weights = np.array(agg_counts)
-        weights_nk = agg_counts.reset_index()
-        k = np.array(weights_nk.k_mock)
-        n = np.array(weights_nk.n_mock)
-        assert len(k) == len(n)
-        assert len(weights) == len(k)
-        alpha, beta = fit_betabinom_ab(n, k, weights=weights)
+        weights = np.array(mock_table['count'])
+        k_vals = np.array(mock_table.k_mock)
+        n_vals = np.array(mock_table.n_mock)
+        assert len(k_vals) == len(n_vals)
+        assert len(weights) == len(k_vals)
+        alpha, beta = fit_betabinom_ab(n_vals, k_vals, weights=weights)
     else:
         alpha_estim = []
         beta_estim = []
         for n in 3, 4, 5:
-            k = mock_table.k_mock[mock_table.n_mock == n]
-            a, b = fit_betabinom_ab(n * np.ones(len(k)), k)
+            subtable_n = mock_table[mock_table.n_mock == n]
+            weights = subtable_n['count']
+            k_vals = subtable_n.k_mock
+            n_vals = subtable_n.n_n_mock  # all == n
+            a, b = fit_betabinom_ab(n_vals, k_vals, weights)
             alpha_estim.append(a)
             beta_estim.append(b)
         alpha = np.mean(alpha_estim)
@@ -131,15 +138,18 @@ def main():
         pickle.dump(parameters, pkl)
 
 
-def fast_geom_mm_fit(x, p_init, pi_init, n_iter=250):
-    N = len(x)
+def fast_geom_mm_fit(x, p_init, pi_init, n_iter=250, weights=None):
+    if weights is None:
+        N = len(x)
+    else:
+        N = sum(weights)
     p = np.array(p_init)
     pi = np.array(pi_init)
     assert len(p) == len(pi)
 
     # calculate the responsibility for each distinct x value just once
     # and weight by the number of occurences
-    x_agg = np.bincount(x + 1)[1:]
+    x_agg = np.bincount(x + 1, weights)[1:]
     x_new = np.arange(len(x_agg)) + 1
 
     n, d = len(x_new), len(p)
