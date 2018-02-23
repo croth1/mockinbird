@@ -140,7 +140,6 @@ def main():
     with open(args.mock_model, 'rb') as model_file:
         mock_model = pickle.load(model_file)
 
-    df = pd.read_table(args.factor_mock_table)
     with open(args.bam_statistics_json) as json_handle:
         bam_statistics = json.load(json_handle)
 
@@ -253,8 +252,8 @@ def main():
     for idx, row in table_statistics.iterrows():
         pvals_kk.append(pval_k_k_mock(row.k_factor, row.k_mock))
         pvals_nk.append(pval_nk(row.n_factor, row.k_factor))
-    df['pval_kk'] = pvals_kk
-    df['pval_nk'] = pvals_nk
+    table_statistics['pval_kk'] = pvals_kk
+    table_statistics['pval_nk'] = pvals_nk
 
     # set max(pval(k|k')) to 1
     for k_mock, kmock_df in table_statistics.groupby('k_mock'):
