@@ -62,6 +62,7 @@ setup(
             'mb-cap-occupancy = mockinbird.scripts.convert2quantile:run',
             'mb-table2fasta = mockinbird.utils.table2fasta:main',
             'mb-upgrade-table = mockinbird.utils.update_table:main',
+            'bam2mockinbird = mockinbird.scripts.bam2mockinbird:main',
 
             # postprocessing
             'mb-plot-metagene-nobs = mockinbird.plots.makeCenterBothEnds:run',

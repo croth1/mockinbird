@@ -80,8 +80,8 @@ def main():
         while factor_line:
             chrom, pos, strand, k_factor, n_factor = extract_transition(factor_line)
             if strand:
-                _, _, _, k_mock, _ = extract_transition(mock_line)
-                site_statistics[k_factor, n_factor, k_mock] += 1
+                _, _, _, k_mock, n_mock = extract_transition(mock_line)
+                site_statistics[k_factor, n_factor, k_mock, n_mock] += 1
 
                 if k_factor > 0:
                     print(chrom, pos, k_factor, n_factor, k_mock, strand,
@@ -94,9 +94,9 @@ def main():
                 break
 
         with open(args.site_statistics, 'w') as statistics_file:
-            print('k_factor', 'n_factor', 'k_mock', 'count', sep='\t', file=statistics_file)
-            for (k, n, k_mock), count in site_statistics.items():
-                print(k, n, k_mock, count, sep='\t', file=statistics_file)
+            print('k_factor', 'n_factor', 'k_mock', 'n_mock', 'count', sep='\t', file=statistics_file)
+            for (k, n, k_mock, n_mock), count in site_statistics.items():
+                print(k, n, k_mock, n_mock, count, sep='\t', file=statistics_file)
 
 
 if __name__ == '__main__':

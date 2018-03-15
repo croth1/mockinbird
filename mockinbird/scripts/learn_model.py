@@ -101,12 +101,14 @@ def main():
     logger.info('Fitting p(k)')
     pw_m, g_m = geom_mm_fit_fast(k_vals, k_counts, args.max_mixture_components, args.n_iterations)
     plot_fit(k_vals, k_counts, pw_m, g_m, 'p(k)', 'pk_fit', args.out_dir, max_x=25)
+    plot_fit(k_vals, k_counts, pw_m, g_m, 'p(k)', 'pk_fit_long', args.out_dir, max_x=500)
     pg_m = coverage * g_m
     parameters['pk_params'] = pw_m, pg_m
 
     # fit p(n)
     w, g = geom_mm_fit_fast(n_vals, n_counts, args.max_mixture_components, args.n_iterations)
     plot_fit(n_vals, n_counts, w, g, 'p(n)', 'pn_fit', args.out_dir, max_x=400)
+    plot_fit(n_vals, n_counts, w, g, 'p(n)', 'pn_fit_long', args.out_dir, max_x=5000)
     pg = coverage * g
     parameters['pn_params'] = w, pg
 
@@ -158,13 +160,21 @@ def fast_geom_mm_fit(x, p_init, pi_init, n_iter=250, weights=None):
         # calculate the responsibilities
         for k in range(d):
             r_matrix[k, :] = pi[k] * (1 - p[k]) ** (x_new - 1) * p[k]
-        r_matrix /= r_matrix.sum(axis=0)
+        col_sum = r_matrix.sum(axis=0)
+
+        # some outliers might not fit any mixture component. 
+        # They are not considered in this iteration
+        zero_mask = col_sum == 0
+        n_unassigned = np.sum(col_sum[zero_mask])
+        col_sum[zero_mask] = np.inf
+
+        r_matrix /= col_sum
 
         # optimize the parameters
         for k in range(d):
             Nk = np.sum(r_matrix[k, :] * x_agg)
             p[k] = Nk / np.dot(x_agg * x_new, r_matrix[k, :])
-            pi[k] = Nk / N
+            pi[k] = Nk / (N - n_unassigned)
 
     assert np.isclose(np.sum(pi), 1)
     return p, pi

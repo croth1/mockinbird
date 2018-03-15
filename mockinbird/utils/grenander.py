@@ -3,6 +3,7 @@ import numpy as np
 from rpy2.robjects.packages import importr, STAP
 from rpy2 import robjects as ro
 import rpy2.robjects.numpy2ri as rpyn
+from sklearn.isotonic import IsotonicRegression
 
 
 PVAL_ECDF_STR = '''
@@ -75,7 +76,7 @@ PVALUE_EPSILON = 1e-12
 def discrete_pval_grenander_fit(pvals, pval_freqs, eta0=None, full_output=False):
 
     x_ecdf = pvals
-    y_ecdf = pval_freqs.cumsum() / len(pval_freqs)
+    y_ecdf = pval_freqs.cumsum() / sum(pval_freqs)
 
     x_ecdf = np.append(0, x_ecdf)
     y_ecdf = np.append(0, y_ecdf)
@@ -84,41 +85,29 @@ def discrete_pval_grenander_fit(pvals, pval_freqs, eta0=None, full_output=False)
         y_ecdf = np.minimum(y_ecdf, 1 - eta0 * (1 - x_ecdf))
         y_ecdf = np.maximum(y_ecdf, eta0 * x_ecdf)
 
-    # calculate the least concave majorant (lcm)
-    # naive (?) implemenation:
-    # starting from (0,0) in ecdf, draw a line to the point p with the steepest slope connection
-    # repeat from point p, to p'' accoring to above criteria. Stop when (1,1) in ecdf is reached
+    dx = np.diff(x_ecdf)
+    dy = np.diff(y_ecdf)
+    raw_slopes = dy / dx
+    raw_slopes[raw_slopes == np.inf] = np.finfo(np.float).max
 
-    x_knots = [x_ecdf[0]]
-    y_knots = [y_ecdf[0]]
+    # isotonic regression is an efficient way to calculate the monotonic slopes.
+    # Adapted from the original fdrtool R code.
+    ir = IsotonicRegression(increasing=False)
+    ir.fit(x_ecdf[1:], raw_slopes, dx)
+    slopes = ir.predict(x_ecdf[1:])
+    slopes[np.isnan(slopes)] = np.inf
 
-    pval_slopes = []
-
-    i = 0
-    max_i = len(x_ecdf)
-    while i < max_i - 1:
-        x_cur = x_ecdf[i]
-        y_cur = y_ecdf[i]
-        delta_x = x_ecdf[i + 1:] - x_cur
-        delta_y = y_ecdf[i + 1:] - y_cur
-
-        slopes = delta_y / delta_x
-        max_slope_index = np.argmax(slopes)
-        max_slope = slopes[max_slope_index]
-
-        jump_distance = 1 + max_slope_index
-        pval_slopes.extend([max_slope] * jump_distance)
-        i += jump_distance
-
-        x_knots.append(x_ecdf[i])
-        y_knots.append(y_ecdf[i])
-
-    grenander_slopes = np.array(pval_slopes)
+    # if by precision problems we actually have p-values of exactly 0, we run into
+    # numerical issues and have to find a way around
+    if slopes[slopes == np.inf].any():
+        y_grenander = np.cumsum(np.append([0, y_ecdf[1]], slopes[1:] * np.diff(x_ecdf[1:])))
+    else:
+        y_grenander = np.cumsum(np.append(0, slopes * np.diff(x_ecdf)))
 
     if full_output:
-        return grenander_slopes, x_ecdf, y_ecdf, np.array(x_knots), np.array(y_knots)
+        return slopes, x_ecdf, y_ecdf, x_ecdf, y_grenander
     else:
-        return grenander_slopes
+        return slopes
 
 
 def plot_cumul_density(pvals, plot_basename, title):

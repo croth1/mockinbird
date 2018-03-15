@@ -87,7 +87,8 @@ class MockinbirdModule(pl.CmdPipelineModule):
         output_dir = general_cfg['output_dir']
 
         prefix = general_cfg['prefix']
-        trtable_file = pipeline.get_curfile(fmt='trtable')
+        sites = pipeline.get_curfile(fmt='sites')
+        site_freqs = pipeline.get_curfile(fmt='site_freqs')
         mock_model = pipeline.get_curfile(fmt='mock_model')
         post_file = os.path.join(output_dir, prefix + '.post')
 
@@ -100,7 +101,8 @@ class MockinbirdModule(pl.CmdPipelineModule):
             '--max_k_mock %s' % cfg['max_k_mock'],
             '--bam_statistics_json %r' % stat_file,
             '--null_fraction %s' % cfg['null_fraction'],
-            '%r' % trtable_file,
+            '%r' % sites,
+            '%r' % site_freqs,
             '%r' % mock_model,
             '%r' % post_file,
         ]

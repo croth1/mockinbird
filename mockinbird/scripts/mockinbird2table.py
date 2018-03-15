@@ -30,7 +30,10 @@ def main():
                 continue
             if int(toks[2]) < k_thresh:
                 continue
-            score = log(float(toks[7])) + log(float(toks[8]))
+            try:
+                score = log(float(toks[7])) + log(float(toks[8]))
+            except ValueError:
+                continue
             print(*chain(toks[0:4]), score, toks[6], -1, toks[-1], sep='\t', file=outfile)
 
 
