@@ -244,7 +244,7 @@ class FastxClipper(pl.CmdPipelineModule):
 
         cmd = [
             'fastx_clipper',
-            fastq_file,
+            '-i %r' % fastq_file,
             '-a %s' % general_cfg['adapter3prime'],
             '-l %s' % read_cfg['min_len'],
             '> %r' % adapter_clipped_file,

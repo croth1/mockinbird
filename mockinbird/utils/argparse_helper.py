@@ -2,6 +2,20 @@ import argparse
 import os
 
 from mockinbird import __version__
+from functools import partial
+
+def bounded_float(number, low=0, high=1):
+    try:
+        float_number = float(number)
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(str(e))
+
+    if not low <= float_number <= high:
+        msg = 'expected number between %s and %s, got %s' % (low, high, float_number)
+        raise argparse.ArgumentTypeError(msg)
+
+
+float_low0_high1 = partial(bounded_float, low=0, high=1)
 
 
 def dir_rwx(path):

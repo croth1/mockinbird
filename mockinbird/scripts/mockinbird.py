@@ -8,6 +8,9 @@ from mockinbird.scripts.postprocess import register_arguments as postprocess_reg
 from mockinbird.scripts.postprocess import run as postprocess_main
 from mockinbird.scripts.flip_read2 import register_arguments as flipread2_register_args
 from mockinbird.scripts.flip_read2 import run as flipread2_main
+from mockinbird.utils.cmd_tools import check_config as check_cfg
+from mockinbird.utils.cmd_tools import create_metamock as metamock_cfg
+from mockinbird.utils.cmd_tools import subsample_bam as subsample_cfg
 
 
 def create_parser():
@@ -84,8 +87,50 @@ class PostprocessModule(StammpModule):
         postprocess_main(args)
 
 
+class CheckConfigModule(StammpModule):
+    subcommand = 'check-config'
+
+    def __init__(self, parser):
+        help_msg = 'evaluate jinja code and print out the config file'
+        description = help_msg
+        super().__init__(parser, help=help_msg, description=description)
+        scp = self.subcommand_parser
+        check_cfg.register_arguments(scp)
+
+    def __call__(self, args):
+        check_cfg.run(args)
+
+
+class CreateMetaMockModule(StammpModule):
+    subcommand = 'create-metamock'
+
+    def __init__(self, parser):
+        help_msg = 'create a mock experiment from a set of CLIP datasets'
+        description = help_msg
+        super().__init__(parser, help=help_msg, description=description)
+        scp = self.subcommand_parser
+        metamock_cfg.register_arguments(scp)
+
+    def __call__(self, args):
+        metamock_cfg.run(args)
+
+
+class SubsampleBamModule(StammpModule):
+    subcommand = 'subsample-bam'
+
+    def __init__(self, parser):
+        help_msg = 'subsample a bam file roughly to a given number of reads'
+        description = help_msg
+        super().__init__(parser, help=help_msg, description=description)
+        scp = self.subcommand_parser
+        subsample_cfg.register_arguments(scp)
+
+    def __call__(self, args):
+        subsample_cfg.run(args)
+
+
 class FlipMateModule(StammpModule):
-    subcommand = 'flip_mate'
+    subcommand = 'flip-mate'
 
     def __init__(self, parser):
         help_msg = 'flip strand of second read'

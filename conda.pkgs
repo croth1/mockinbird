@@ -8,13 +8,13 @@ cython
 scipy
 numpy
 pandas
+scikit-learn
 matplotlib
 pysam
 rpy2
 pyyaml
 jinja2
 r-vgam
-r-fdrtool
 r-LSD
 
 # tools
@@ -25,3 +25,4 @@ umi_tools
 STAR
 bowtie
 xxmotif
+fastx_toolkit

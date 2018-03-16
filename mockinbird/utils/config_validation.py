@@ -228,10 +228,15 @@ def validate_section(config, cfg_format):
                 log_cmd('key %r undefined. Using default value %r.', key, annot.default)
                 cfg_dict[key] = annot.default
             else:
-                msg = ('mandatory configuration key %r missing' % key)
+                msg = 'mandatory configuration key %r missing' % key
                 logger.error(msg)
                 raise ConfigError(msg)
         else:
+            if config[key] is None:
+                msg = 'No value provided for configuration key: %r' % key
+                logger.error(msg)
+                raise ConfigError(msg)
+
             try:
                 raw_data = annot.type(config[key])
                 cfg_dict[key] = annot.converter(raw_data)
