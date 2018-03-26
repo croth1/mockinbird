@@ -114,7 +114,7 @@ class BowtieMapModule(pl.CmdPipelineModule):
             ('genome_index', cv.Annot(str, converter=relgen_conv)),
             ('n_mismatch', cv.Annot(int, default=1, converter=cv.nonneg_integer)),
             ('n_multimap', cv.Annot(int, default=1, converter=cv.nonneg_integer)),
-            ('extra_flags', cv.Annot(str, default=[], converter=cv.comma_sep_args)),
+            ('extra_flags', cv.Annot(list, default=[])),
         ]
         super().__init__(pipeline, cfg_req=cfg_fmt)
 

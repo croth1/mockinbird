@@ -5,6 +5,8 @@ from rpy2 import robjects as ro
 import rpy2.robjects.numpy2ri as rpyn
 from sklearn.isotonic import IsotonicRegression
 
+from mockinbird.utils import deprecated
+
 
 PVAL_ECDF_STR = '''
 options(warn=-1)
@@ -56,6 +58,7 @@ plot_ecdf_lcm <- function(pvals, outfile, title) {
 ecdf_pkg = STAP(PVAL_ECDF_STR, 'ecdf_pkg')
 
 
+@deprecated('is replaced by pure python implementation: discrete_pval_grenander_fit')
 def pval_grenander_fit(pvals):
     fdrtool = importr('fdrtool')
     pval_vec = ro.FloatVector(pvals)
