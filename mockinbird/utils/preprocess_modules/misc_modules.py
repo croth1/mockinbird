@@ -472,8 +472,10 @@ class SoftclipAnalysisModule(pl.CmdPipelineModule):
 
 class NormalizationModule(pl.CmdPipelineModule):
     def __init__(self, pipeline):
+        relpath_conv = partial(cv.rel_file_r_validator, cfg_path=pipeline.cfg_path)
         cfg_fmt = [
             ('mut_snp_ratio', cv.Annot(float, default=0.75)),
+            ('normalization_pileup', cv.Annot(str, converter=relpath_conv))
         ]
         super().__init__(pipeline, cfg_req=cfg_fmt)
 
@@ -490,7 +492,7 @@ class NormalizationModule(pl.CmdPipelineModule):
             'mb-normalize',
             table_file,
             normed_table_file,
-            general_cfg['normalization_pileup'],
+            '%r' % cfg['normalization_pileup'],
             '--mut_snp_ratio %s' % cfg['mut_snp_ratio'],
         ]
         self._cmds.append(cmd)

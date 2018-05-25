@@ -85,7 +85,6 @@ def run(args):
         ('adapter5prime', cv.Annot(str, converter=cv.dnastr_validator)),
         ('adapter3prime', cv.Annot(str, converter=cv.dnastr_validator)),
         ('genomefasta', cv.Annot(str, converter=genomefasta_validator)),
-        ('normalization_pileup', cv.Annot(str, converter=relpath_conv)),
         ('rmTemp', cv.Annot(cv.boolean, default=True)),
         ('n_threads', cv.Annot(int, default=2)),
     ])
