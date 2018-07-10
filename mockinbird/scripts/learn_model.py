@@ -4,13 +4,15 @@ import os
 import pickle
 import logging
 
+
 import matplotlib as mpl
 mpl.use('agg')
 import matplotlib.pyplot as plt
 import numpy as np
+from scipy.misc import logsumexp
 import pandas as pd
 
-from mockinbird.utils.fit_betabinom import fit_betabinom_ab
+from mockinbird.utils.fit_betabinom import fit_betabinom_ab, sample_betabinom_ab
 
 
 logger = logging.getLogger()
@@ -33,9 +35,12 @@ def plot_fit(x, x_weights, w, a, title, file_name, out_dir, max_x=None):
         return np.sum(w * (a / (1 + a) ** (k + 1)))
 
     if max_x:
-        bins = int(x.max())
+        bins = max_x
+    else:
+        max_x = int(x.max())
+        bins = 100
 
-    fit = [geom_distr(k, w, a) for k in range(np.max(x) + 1)]
+    fit = [geom_distr(k, w, a) for k in range(max_x + 1)]
     fit = np.array(fit)
     fig, ax = plt.subplots()
     ax.hist(x, weights=x_weights, log=True, bins=bins, normed=True, alpha=0.5)
@@ -74,6 +79,11 @@ def geom_mm_fit_fast(x, x_counts, n_components, n_iter=100):
 def main():
     parser = create_parser()
     args = parser.parse_args()
+
+    ch = logging.StreamHandler()
+    logger.addHandler(ch)
+    logger.setLevel(logging.INFO)
+
     if not os.path.exists(args.out_dir):
         os.makedirs(args.out_dir)
 
@@ -106,19 +116,32 @@ def main():
     parameters['pk_params'] = pw_m, pg_m
 
     # fit p(n)
+    logger.info('Fitting p(n)')
     w, g = geom_mm_fit_fast(n_vals, n_counts, args.max_mixture_components, args.n_iterations)
     plot_fit(n_vals, n_counts, w, g, 'p(n)', 'pn_fit', args.out_dir, max_x=400)
     plot_fit(n_vals, n_counts, w, g, 'p(n)', 'pn_fit_long', args.out_dir, max_x=5000)
     pg = coverage * g
     parameters['pn_params'] = w, pg
+    small_n_params = {}
 
+    logger.info('Fitting p(k|n)')
+    INDIVIDUAL_FIT_N_THRESH = 5
     if not args.no_global_fit:
-        weights = np.array(mock_table['count'])
-        k_vals = np.array(mock_table.k_mock)
-        n_vals = np.array(mock_table.n_mock)
+        weights = np.array(mock_table['count'], dtype=float)
+        k_vals = np.array(mock_table.k_mock, dtype=float)
+        n_vals = np.array(mock_table.n_mock, dtype=float)
+        mask = (n_vals > INDIVIDUAL_FIT_N_THRESH)
         assert len(k_vals) == len(n_vals)
         assert len(weights) == len(k_vals)
-        alpha, beta = fit_betabinom_ab(n_vals, k_vals, weights=weights)
+        alpha, beta = fit_betabinom_ab(n_vals[mask], k_vals[mask], weights=weights[mask])
+
+        # fit small n separately
+        mask = (n_vals > 0) & (n_vals <= INDIVIDUAL_FIT_N_THRESH)
+        for n, w_df in mock_table.loc[mask, :].groupby('n_mock'):
+            n_vec = np.ones(len(w_df)) * n
+            alpha_idv, beta_idv = fit_betabinom_ab(n_vec, w_df.k_mock, weights=w_df['count'])
+            small_n_params[n] = (alpha_idv, beta_idv)
+
     else:
         alpha_estim = []
         beta_estim = []
@@ -134,6 +157,7 @@ def main():
         beta = np.mean(beta_estim)
 
     parameters['pkn_params'] = alpha, beta
+    parameters['pkn_idv_params'] = small_n_params
 
     model_file = os.path.join(args.out_dir, 'model.pkl')
     with open(model_file, 'wb') as pkl:
@@ -159,22 +183,16 @@ def fast_geom_mm_fit(x, p_init, pi_init, n_iter=250, weights=None):
     for i in range(n_iter):
         # calculate the responsibilities
         for k in range(d):
-            r_matrix[k, :] = pi[k] * (1 - p[k]) ** (x_new - 1) * p[k]
-        col_sum = r_matrix.sum(axis=0)
-
-        # some outliers might not fit any mixture component. 
-        # They are not considered in this iteration
-        zero_mask = col_sum == 0
-        n_unassigned = np.sum(col_sum[zero_mask])
-        col_sum[zero_mask] = np.inf
-
-        r_matrix /= col_sum
+            r_matrix[k, :] = np.log(pi[k]) + (x_new - 1) * np.log((1 - p[k])) + np.log(p[k])
+            #r_matrix[k, :] = pi[k] * (1 - p[k]) ** (x_new - 1) * p[k]
+        col_logexp_sum = logsumexp(r_matrix, axis=0)
+        r_matrix = np.exp(r_matrix - col_logexp_sum)
 
         # optimize the parameters
         for k in range(d):
             Nk = np.sum(r_matrix[k, :] * x_agg)
             p[k] = Nk / np.dot(x_agg * x_new, r_matrix[k, :])
-            pi[k] = Nk / (N - n_unassigned)
+            pi[k] = Nk / (N)
 
     assert np.isclose(np.sum(pi), 1)
     return p, pi

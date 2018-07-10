@@ -12,10 +12,11 @@ import matplotlib.pyplot as plt
 
 import pandas as pd
 import numpy as np
-from scipy.special import binom
+from scipy.special import gammaln
+from scipy.misc import logsumexp
 
 from mockinbird.utils.grenander import discrete_pval_grenander_fit
-from mockinbird.utils.fit_betabinom import p_kn_wrapper
+from mockinbird.utils.fit_betabinom import lp_kn_wrapper
 
 
 def create_parser():
@@ -37,75 +38,89 @@ def create_parser():
     return parser
 
 
-def pk_wrapper(N, g_m, w_m):
-    @lru_cache(maxsize=2**15)
-    def pk_inner(k):
-        return np.sum(w_m * (g_m / N) / ((1 + g_m / N)**(k + 1)))
-    return pk_inner
+def lpk_wrapper(N, g_m, w_m):
+    lg_m = np.log(g_m)
+    lw_m = np.log(w_m)
+    lN = np.log(N)
+
+    def lpk_inner(k):
+        l_pk = logsumexp(lw_m + lg_m - lN - np.outer(k + 1, np.log(1 + g_m / N)), axis=1)
+        return l_pk
+    return lpk_inner
 
 
-def pk_k_mock_wrapper(N, N_mock, g_m, w_m, pk):
-    @lru_cache(maxsize=2**15)
-    def pk_k_mock_inner(k, k_mock):
-        N_bar = (N + N_mock) / 2
-        res = 0
-        res -= np.log(pk(k_mock))
-        res += np.log(binom(k + k_mock, k))
+def lpk_k_mock_wrapper(N, N_mock, g_m, w_m, lpk):
+    lg_m = np.log(g_m)
+    lw_m = np.log(w_m)
+    N_bar = (N + N_mock) / 2
+    lN_bar = np.log(N_bar)
+
+    def lpk_k_mock_inner(k, k_mock):
+        res = np.zeros(len(k))
+        res -= lpk(k_mock)
+        res += gammaln(k + k_mock + 1) - gammaln(k_mock + 1) - gammaln(k + 1)
         res += k_mock * np.log(N_mock / N_bar)
         res += k * np.log(N / N_bar)
-        res += np.log(np.sum(w_m * (g_m / N_bar) / ((2 + g_m / N_bar)**(k + k_mock + 1))))
-        return np.exp(res)
-    return pk_k_mock_inner
+        res += logsumexp(lw_m + lg_m - lN_bar - np.outer(k + k_mock + 1, np.log(2 + g_m / N_bar)),
+                         axis=1)
+        return res
+    return lpk_k_mock_inner
 
 
-def pval_k_wrapper(pk_k_mock):
+def pval_k_wrapper(lpk_k_mock):
     @lru_cache(maxsize=2**15)
     def pval_k_inner(k, k_mock):
-        p_sum = 1
-        for k_i in range(k):
-            p_sum -= pk_k_mock(k_i, k_mock)
-            p_sum = max(0, p_sum)
-        return p_sum
+
+        # probability of observing at least 0 transitions is 1
+        if k == 0:
+            return 1
+        k_i = np.arange(k)
+
+        log_sum = logsumexp(lpk_k_mock(k_i, k_mock))
+        p_val = 1 - np.exp(log_sum)
+        p_val = max(0, p_val)
+        return p_val
     return pval_k_inner
 
 
-def pval_nk_wrapper(pn_k):
+def pval_nk_wrapper(lpn_k):
     @lru_cache(maxsize=2**15)
     def pval_n_inner(n, k):
-        p_sum = 0
-        for n_i in range(k, n + 1):
-            p = pn_k(n_i, k)
-            assert 0 <= p <= 1, '(n=%s, k=%s): invalid probability: %s' % (n, k, p)
-            p_sum += p
-        assert 0 <= p_sum <= 1.0001, "invalid p-value: %s" % p_sum
-        return min(p_sum, 1)
+        n_i = np.arange(k, n + 1)
+        log_prob = lpn_k(n_i, k)
+        summed_prob = logsumexp(log_prob)
+
+        pval = np.exp(summed_prob)
+        assert np.all(log_prob <= 0)
+        assert 0 <= pval <= 1.0001, 'invalid p-value: %s' % pval
+        return min(pval, 1)
     return pval_n_inner
 
 
-def norm_wrapper(p_kn, p_n):
+def lnorm_wrapper(lp_kn, lp_n):
     @lru_cache(maxsize=2**15)
-    def p_k_inner(k):
-        p_k = 0
-        for n in range(k, 50000):
-            p_k += p_kn(k, n) * p_n(n)
-        return p_k
-    return p_k_inner
+    def lp_k_inner(k):
+        n = np.arange(k, 50000)
+        assert np.all(lp_kn(k, n) <= 0)
+        assert np.all(lp_n(n) <= 0)
+        return logsumexp(lp_kn(k, n) + lp_n(n))
+    return lp_k_inner
 
 
-def p_nk_wrapper(p_kn, p_n, norm):
-    @lru_cache(maxsize=2**15)
+def lp_nk_wrapper(lp_kn, lp_n, lnorm):
     def p_nk_inner(n, k):
-        return p_kn(k, n) * p_n(n) / norm(k)
+        return lp_kn(k, n) + lp_n(n) - lnorm(k)
     return p_nk_inner
 
 
-def p_n_wrapper(w, a, N):
+def lp_n_wrapper(w, a, N):
     a = a / N
+    lw = np.log(w)
+    la = np.log(a)
 
-    @lru_cache(maxsize=2**15)
-    def geom_distr(x):
-        return np.sum(w * (a / (1 + a) ** x))
-    return geom_distr
+    def lgeom_distr(x):
+        return logsumexp(lw + la - np.outer(x + 1, np.log(1 + a)), axis=1)
+    return lgeom_distr
 
 
 def plot_fit(k_vals, w, a, title, file_name, out_dir):
@@ -221,15 +236,44 @@ def main():
         print('mock_cov:', mock_cov)
         print('factor_cov pct: %.4f' % (factor_cov / mock_cov))
 
-    pk = pk_wrapper(mock_cov, pg_m, pw_m)
-    pk_k_mock = pk_k_mock_wrapper(factor_cov, mock_cov, pg_m, pw_m, pk)
+    lpk = lpk_wrapper(mock_cov, pg_m, pw_m)
+    pk_k_mock = lpk_k_mock_wrapper(factor_cov, mock_cov, pg_m, pw_m, lpk)
     pval_k_k_mock = pval_k_wrapper(pk_k_mock)
 
-    p_n = p_n_wrapper(pn_w, pn_g, factor_cov)
-    p_kn = p_kn_wrapper(alpha, beta)
-    norm = norm_wrapper(p_kn, p_n)
-    pn_k = p_nk_wrapper(p_kn, p_n, norm)
-    pval_nk = pval_nk_wrapper(pn_k)
+    lp_n = lp_n_wrapper(pn_w, pn_g, factor_cov)
+    lp_kn = lp_kn_wrapper(alpha, beta, mock_model['pkn_idv_params'])
+    lnorm = lnorm_wrapper(lp_kn, lp_n)
+    lpn_k = lp_nk_wrapper(lp_kn, lp_n, lnorm)
+    pval_nk = pval_nk_wrapper(lpn_k)
+
+
+    """TODO == remove ==
+    arr0 = np.array([0])
+    arr1 = np.array([1])
+    arr4 = np.array([4])
+    arr5 = np.array([5])
+    arr10 = np.array([10])
+    arr20 = np.array([20])
+    arr30 = np.array([30])
+
+    print(np.exp(lpn_k(arr4, 10)), np.exp(lpn_k(arr5, 4)), np.exp(lpn_k(arr10, 4)), np.exp(lpn_k(arr20, 4)), np.exp(lpn_k(arr30, 4)) )
+
+    n_s = np.arange(100000)
+    print(np.exp(lp_n(arr1) * lpn_k(arr1, 0)))
+    print(np.exp(lp_n(np.array([2]))))
+    """
+
+    k = 20
+    n_i = np.arange(k, 10000)
+    prob_arr = np.exp(lpn_k(n_i, k))
+
+    n_arr = np.exp(lp_n(n_i))
+    nk_arr = np.exp(lp_kn(n_i, np.array([k])))
+
+    np.savetxt('/tmp/pn_k', prob_arr)
+    np.savetxt('/tmp/p_n', n_arr)
+    np.savetxt('/tmp/p_k', nk_arr)
+
 
     # calculate p-values
     table_statistics = pd.read_table(args.factor_mock_statistics)

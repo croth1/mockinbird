@@ -1,5 +1,6 @@
 from functools import lru_cache
 import warnings
+import collections
 
 import numpy as np
 
@@ -28,6 +29,10 @@ eval_betabinom <- function(n, k, a, b) {
     p <- dbetabinom.ab(k, size=n, shape1=a, shape2=b)
     return(p)
 }
+
+sample_betabinom <- function(n, N, a, b) {
+    sample <- rbetabinom.ab(N, size=n, shape1=a, shape2=b) 
+}
 """
 
 with warnings.catch_warnings():
@@ -51,16 +56,31 @@ def fit_betabinom_ab(n, k, weights=None):
     return np.exp(log_a), np.exp(log_b)
 
 
-def p_kn_wrapper(a, b):
-    @lru_cache(maxsize=2**15)
-    def p_kn(k, n):
-        #p = binom(n, k) * beta(a+k,b+n-k) / beta(a, b)
-        p = np.exp(
+def sample_betabinom_ab(n, N, a, b):
+    result_r = bbfit.sample_betabinom(n, N, a, b)
+    result = rpyn.ri2py(result_r)
+    return result
+
+
+def lp_kn_wrapper(a, b, idv_fit_ab):
+    def lp_kn(k, n):
+
+        if not isinstance(n, collections.Iterable):
+            n = [n]
+
+        def map_fun(n):
+            return idv_fit_ab.get(n, (a, b))
+
+        a_list, b_list = list(zip(*list(map(map_fun, n))))
+        alpha = np.array(a_list)
+        beta = np.array(b_list)
+
+        lp = (
             - betaln(1 + n - k, 1 + k)
             - np.log(n + 1)
-            + betaln(a + k, b + n - k)
-            - betaln(a, b)
+            + betaln(alpha + k, beta + n - k)
+            - betaln(alpha, beta)
         )
-        assert 0 <= p <= 1, "(n=%s, k=%s) -> p=%s" % (n, k, p)
-        return p
-    return p_kn
+        assert np.all(lp <= 0)
+        return lp
+    return lp_kn
