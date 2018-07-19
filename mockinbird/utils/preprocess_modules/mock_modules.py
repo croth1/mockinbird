@@ -44,12 +44,12 @@ class BamStatisticsModule(pl.CmdPipelineModule):
 class Bam2MockinbirdModule(pl.CmdPipelineModule):
 
     def __init__(self, pipeline):
-        rw_conv = partial(cv.rel_file_rw_validator, cfg_path=pipeline.cfg_path)
         r_conv = partial(cv.rel_file_r_validator, cfg_path=pipeline.cfg_path)
         cfg_fmt = [
             ('mock_bam', cv.Annot(converter=r_conv)),
             ('genome_fasta', cv.Annot(converter=r_conv)),
             ('bed_regions', cv.Annot(converter=r_conv, default='', warn_if_missing=False)),
+            ('aggregate_win', cv.Annot(converter=int, default=1)),
         ]
         super().__init__(pipeline, cfg_req=cfg_fmt)
 
@@ -76,6 +76,8 @@ class Bam2MockinbirdModule(pl.CmdPipelineModule):
             '%r' % site_freqs,
             '--transition_from %s' % read_cfg['reference_nucleotide'],
             '--transition_to %s' % read_cfg['mutation_nucleotide'],
+            '--aggregate_bp %s' % cfg['aggregate_win'],
+            '--n_processes %s' % general_cfg['n_threads'],
         ]
         if cfg['bed_regions']:
             cmd.append('-l %r' % cfg['bed_regions'])

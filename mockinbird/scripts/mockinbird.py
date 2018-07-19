@@ -1,7 +1,11 @@
 import argparse
 import sys
 
-from mockinbird import __version__
+try:
+    from mockinbird import __version__
+except ImportError:
+    __version__ = 'unknown'
+
 from mockinbird.scripts.preprocess import register_arguments as preprocess_register_args
 from mockinbird.scripts.preprocess import run as preprocess_main
 from mockinbird.scripts.postprocess import register_arguments as postprocess_register_args

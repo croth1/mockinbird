@@ -100,7 +100,7 @@ def pval_nk_wrapper(lpn_k):
 def lnorm_wrapper(lp_kn, lp_n):
     @lru_cache(maxsize=2**15)
     def lp_k_inner(k):
-        n = np.arange(k, 50000)
+        n = np.arange(k, 100000)
         assert np.all(lp_kn(k, n) <= 0)
         assert np.all(lp_n(n) <= 0)
         return logsumexp(lp_kn(k, n) + lp_n(n))

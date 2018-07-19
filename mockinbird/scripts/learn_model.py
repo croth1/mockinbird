@@ -92,6 +92,7 @@ def main():
 
     mock_table = pd.read_table(args.transition_table,
                                usecols=['n_mock', 'k_mock', 'count'])
+    mock_table = mock_table.groupby(['n_mock', 'k_mock']).agg({'count': sum}).reset_index()
 
     k_collapsed = mock_table.groupby('k_mock').agg({'count': sum}).reset_index()
     k_vals = k_collapsed.k_mock

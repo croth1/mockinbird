@@ -6,11 +6,30 @@ from multiprocessing import Pool
 
 from collections import Counter, defaultdict, namedtuple
 
+from mockinbird.utils import cy_helpers
+from dataclasses import dataclass
+
+@dataclass
+class BufferAgg:
+    n: int
+    k: int
+    n_mock: int
+    k_mock: int
+
 
 class Region(namedtuple('Region', ['seqid', 'start', 'end'])):
     __slots__ = ()
+
     def __str__(self):
         return '%s:%s-%s' % (self.seqid, self.start, self.end)
+
+
+class FullSite(namedtuple('Site', ['seqid', 'pos', 'strand', 'n', 'k', 'n_mock', 'k_mock'])):
+    __slots__ = ()
+
+
+class PileupSite(namedtuple('Site', ['seqid', 'pos', 'strand', 'n', 'k'])):
+    __slots__ = ()
 
 
 def create_parser():
@@ -23,11 +42,11 @@ def create_parser():
     parser.add_argument('--transition_from', choices=['A', 'C', 'G', 'T'], default='T')
     parser.add_argument('--transition_to', choices=['A', 'C', 'G', 'T'], default='C')
     parser.add_argument('--n_processes', type=int)
+    parser.add_argument('--ieclip_model', action='store_true')
+    parser.add_argument('--aggregate_bp', type=int, default=1)
+    parser.add_argument('--min_k', type=int, default=1)
 
     return parser
-
-
-BP_PER_REGION = 10000000
 
 
 def main():
@@ -44,18 +63,25 @@ def main():
 
     statistics = Counter()
 
-    with Pool(args.n_processes) as pool:
-        jobs = []
+    if args.n_processes == 1:
         for region in regions:
-            pileup_args = (region, args)
-
-            job = pool.apply_async(pileup_region, args=pileup_args)
-            jobs.append(job)
-
-        for job in jobs:
-            sites, stats = job.get()
+            sites, stats = pileup_region(region, args)
             statistics.update(stats)
             write_sites(sites, args.binding_sites)
+
+    else:
+        with Pool(args.n_processes) as pool:
+            jobs = []
+            for region in regions:
+                pileup_args = (region, args)
+
+                job = pool.apply_async(pileup_region, args=pileup_args)
+                jobs.append(job)
+
+            for job in jobs:
+                sites, stats = job.get()
+                statistics.update(stats)
+                write_sites(sites, args.binding_sites)
 
     write_statistics(statistics, args.site_statistics)
 
@@ -64,11 +90,10 @@ def generate_regions(fasta_idx_file):
     regions = []
     with open(fasta_idx_file) as handle:
         for line in handle:
-            seq_id, bp_str, *_ = line.split()
-            bp = int(bp_str)
-            for start in range(1, bp, BP_PER_REGION):
-                region = Region(seq_id, start, start + BP_PER_REGION - 1)
-                regions.append(region)
+            seq_id, seq_len_str, *_ = line.split()
+            seq_len = int(seq_len_str)
+            region = Region(seq_id, 1, seq_len)
+            regions.append(region)
     return regions
 
 
@@ -107,10 +132,10 @@ def pileup_region(region, args):
         elif ref_nuc == minus_transition_from:
             strand = '-'
         else:
-            return chrom, pos, None, 0, 0
+            return None
 
         if cov == '0':
-            n, k = 0, 0
+            n = k = 0
         else:
             cov_symb = Counter(cov_str)
             if ref_nuc == plus_transition_from:
@@ -119,28 +144,136 @@ def pileup_region(region, args):
             elif ref_nuc == minus_transition_from:
                 k = cov_symb[minus_transition_to]
                 n = k + cov_symb[',']
-        return chrom, pos, strand, k, n
+        return (chrom, pos, strand, n, k)
 
     with Popen([pileup_cmd % (args.genome_fasta, args.protein_bam, region)], **extra_args) as factor_proc,\
             Popen([pileup_cmd % (args.genome_fasta, args.mock_bam, region)], **extra_args) as mock_proc:
 
+        agg_bp = args.aggregate_bp
+        min_k = args.min_k
+        is_ieclip = args.ieclip_model
+
+        if agg_bp > 1:
+            fwd_buffer = []
+            fwd_agg = BufferAgg(0, 0, 0, 0)
+            rev_buffer = []
+            rev_agg = BufferAgg(0, 0, 0, 0)
+
         factor = factor_proc.stdout
         mock = mock_proc.stdout
-
-        factor_line = next(factor)
-        mock_line = next(mock)
 
         sites = []
         site_statistics = defaultdict(int)
 
-        while factor_line:
-            chrom, pos, strand, k_factor, n_factor = extract_transition(factor_line)
-            if strand:
-                _, _, _, k_mock, n_mock = extract_transition(mock_line)
-                site_statistics[k_factor, n_factor, k_mock, n_mock] += 1
+        try:
+            factor_line = next(factor)
+            mock_line = next(mock)
+        except StopIteration:
+            return sites, site_statistics
 
-                if k_factor > 0:
-                    sites.append((chrom, pos, k_factor, n_factor, k_mock, strand))
+        while factor_line:
+            extracted_sites = []
+            # PARCLIP mode
+            if not is_ieclip:
+                factor_site = extract_transition(factor_line)
+                # None is a site that cannot be mutated
+                if factor_site:
+                    mock_site = extract_transition(mock_line)
+                    f_seqid, f_pos, f_strand, f_n, f_k = factor_site
+                    m_seqid, m_pos, m_strand, m_n, m_k = mock_site
+                    full_site = FullSite(
+                        f_seqid,
+                        f_pos,
+                        f_strand,
+                        f_n,
+                        f_k,
+                        m_n,
+                        m_k,
+                    )
+                    extracted_sites.append(full_site)
+            else:
+                factor_sites = cy_helpers.extract_ieclip_cy(factor_line)
+                mock_sites = cy_helpers.extract_ieclip_cy(mock_line)
+                for factor_site, mock_site in zip(factor_sites, mock_sites):
+                    f_seqid, f_pos, f_strand, f_n, f_k = factor_site
+                    m_seqid, m_pos, m_strand, m_n, m_k = mock_site
+
+                    full_site = FullSite(
+                        f_seqid,
+                        f_pos,
+                        f_strand,
+                        f_n,
+                        f_k,
+                        m_n,
+                        m_k,
+                    )
+                    extracted_sites.append(full_site)
+
+            output_sites = []
+            for site in extracted_sites:
+                if agg_bp > 1:
+                    # aggregation logic comes here
+                    if site.strand == '+':
+                        site_buffer = fwd_buffer
+
+                    if site.strand:
+                        site_buffer = fwd_buffer
+                        agg_buffer = fwd_agg
+                    else:
+                        site_buffer = rev_buffer
+                        agg_buffer = rev_agg
+
+                    # we cannot make predictions for the first and last agg_bp // 2 sites
+                    if len(site_buffer) == agg_bp - 1:
+
+                        agg_buffer.n += site.n
+                        agg_buffer.k += site.k
+                        agg_buffer.n_mock += site.n_mock
+                        agg_buffer.k_mock += site.k_mock
+
+                        current_pos = site_buffer[len(site_buffer) // 2]
+                        site_buffer.append(site)
+                        prev_site = site_buffer.pop(0)
+
+                        output_site = FullSite(
+                            current_pos.seqid,
+                            current_pos.pos,
+                            current_pos.strand,
+                            n=agg_buffer.n,
+                            k=agg_buffer.k,
+                            n_mock=agg_buffer.n_mock,
+                            k_mock=agg_buffer.k_mock,
+                        )
+                        output_sites.append(output_site)
+
+                        agg_buffer.n -= prev_site.n
+                        agg_buffer.k -= prev_site.k
+                        agg_buffer.n_mock -= prev_site.n_mock
+                        agg_buffer.k_mock -= prev_site.k_mock
+
+                    else:
+                        # buffer not full yet, we cannot aggregate
+                        site_buffer.append(site)
+                        agg_buffer.n += site.n
+                        agg_buffer.k += site.k
+                        agg_buffer.n_mock += site.n_mock
+                        agg_buffer.k_mock += site.k_mock
+
+                else:
+                    output_sites.append(site)
+
+            for site in output_sites:
+                site_statistics[site.k, site.n, site.k_mock, site.n_mock] += 1
+
+                if site.k >= min_k:
+                    sites.append((
+                        site.seqid,
+                        site.pos,
+                        site.k,
+                        site.n,
+                        site.k_mock,
+                        site.strand
+                    ))
 
             try:
                 factor_line = next(factor)

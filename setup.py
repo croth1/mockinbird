@@ -15,6 +15,7 @@ module_names = [
     "mockinbird.ivtree.ivnode",
     "mockinbird.ivtree.tests.node_utils",
     "mockinbird.ivtree.tests.tree_utils",
+    "mockinbird.utils.cy_helpers",
 ]
 
 extensions = []
@@ -63,6 +64,7 @@ setup(
             'mb-table2fasta = mockinbird.utils.table2fasta:main',
             'mb-upgrade-table = mockinbird.utils.update_table:main',
             'bam2mockinbird = mockinbird.scripts.bam2mockinbird:main',
+            'iclipbam2arrow = mockinbird.scripts.iclipbam2arrow:main',
 
             # postprocessing
             'mb-plot-metagene-nobs = mockinbird.plots.makeCenterBothEnds:run',
