@@ -11,6 +11,7 @@
 #include <vector>
 #include <unordered_map>
 #include <fstream>
+#include <memory>
 
 struct SiteBuffer {
   std::list<int> pos;
@@ -21,7 +22,7 @@ struct SiteBuffer {
 };
 
 enum class ParsingState {
-  SEQID, POSITION, NUCLEOTIDE, COVERAGE, COVERAGE_STRING
+  SEQID, POSITION, NUCLEOTIDE, COVERAGE, COVERAGE_STRING, QUALITY_STRING, DONE
 };
 
 enum class CoverageState {
@@ -32,6 +33,12 @@ struct Site {
   int pos;
   int n;
   int k;
+};
+
+struct State {
+  ParsingState parsing_state;
+  CoverageState coverage_state;
+  int remaining_coverage;
 };
 
 struct FullSite {
@@ -67,19 +74,20 @@ namespace std {
       return hash;
     }
   };
-
 }
 
-constexpr int buffer_size = 1000000;
+constexpr int buffer_size = 100;
 
-void parse_mpileup_line(std::array<char, buffer_size> & buffer, Site& plus_site, Site& minus_site);
-void inline insert_site(SiteBuffer& buf, Site& factor_site, Site& mock_site);
-void inline delete_site(SiteBuffer& buf);
-void inline aggregate_weighted_sum(SiteBuffer& buf, std::vector<double>& weights, FullSite& output);
-void inline count_site(std::unordered_map<FullSite, size_t>& map, FullSite& site);
-void inline write_site(std::ofstream& file_stream, FullSite& site, std::string strand, int threshold);
-void inline write_statistics(std::string& statistics_filename, std::unordered_map<FullSite, size_t>& statistics);
-
+bool parse_mpileup_line(std::array<char, buffer_size>& buffer, Site& plus_site, Site& minus_site, State& state);
+inline void insert_site(SiteBuffer& buf, Site& factor_site, Site& mock_site);
+inline void delete_site(SiteBuffer& buf);
+inline void aggregate_weighted_sum(SiteBuffer& buf, std::vector<double>& weights, FullSite& output);
+inline void count_site(std::unordered_map<FullSite, size_t>& map, FullSite& site);
+inline void write_site(std::ofstream& file_stream, FullSite& site, std::string strand, int threshold);
+inline void write_statistics(std::string& statistics_filename, std::unordered_map<FullSite, size_t>& statistics);
+inline void reset_site(Site& site);
+inline void reset_state(State& state);
+inline int extract_integer(char* array, int start, int length);
 
 
 struct Arguments {
@@ -139,135 +147,164 @@ void gather_mockinbird_data(Arguments& args) {
   FullSite full_plus_site;
   FullSite full_minus_site;
 
+  State factor_state;
+  State mock_state;
+
   std::unordered_map<FullSite, size_t> statistics;
 
   unsigned n_sites = 0;
   while (!feof(factor_pipe.get()) & !feof(mock_pipe.get())) {
-    if ((fgets(buffer.data(), buffer_size, factor_pipe.get())) != nullptr) {
-      parse_mpileup_line(buffer, factor_site_plus, factor_site_minus);
 
-      // should not fail, because both outputs have exactly the same size
+    reset_state(factor_state);
+    reset_site(factor_site_plus);
+    reset_site(factor_site_minus);
+    if((fgets(buffer.data(), buffer_size, factor_pipe.get())) == nullptr) {
+      continue;
+    }
+    while(parse_mpileup_line(buffer, factor_site_plus, factor_site_minus, factor_state)) {
+      fgets(buffer.data(), buffer_size, factor_pipe.get());
+    }
+
+    reset_state(mock_state);
+    reset_site(mock_site_plus);
+    reset_site(mock_site_minus);
+    if (fgets(buffer.data(), buffer_size, mock_pipe.get()) == nullptr) {
+      continue;
+    }
+    while(parse_mpileup_line(buffer, mock_site_plus, mock_site_minus, mock_state)) {
       fgets(buffer.data(), buffer_size, mock_pipe.get());
-      parse_mpileup_line(buffer, mock_site_plus, mock_site_minus);
+    }
 
-      insert_site(plus_buffer, factor_site_plus, mock_site_plus);
-      insert_site(minus_buffer, factor_site_minus, mock_site_minus);
-      n_sites += 1;
+    insert_site(plus_buffer, factor_site_plus, mock_site_plus);
+    insert_site(minus_buffer, factor_site_minus, mock_site_minus);
+    n_sites += 1;
 
-      // check if buffer is ready
-      if (n_sites >= args.window_size) {
-        aggregate_weighted_sum(plus_buffer, weights, full_plus_site);
-        aggregate_weighted_sum(minus_buffer, weights, full_minus_site);
+    // check if buffer is ready
+    if (n_sites >= args.window_size) {
+      aggregate_weighted_sum(plus_buffer, weights, full_plus_site);
+      aggregate_weighted_sum(minus_buffer, weights, full_minus_site);
 
-        count_site(statistics, full_plus_site);
-        count_site(statistics, full_minus_site);
+      count_site(statistics, full_plus_site);
+      count_site(statistics, full_minus_site);
 
-        write_site(sites_file, full_plus_site, "+", 1);
-        write_site(sites_file, full_minus_site, "-", 1);
+      write_site(sites_file, full_plus_site, "+", 1);
+      write_site(sites_file, full_minus_site, "-", 1);
 
-        delete_site(plus_buffer);
-        delete_site(minus_buffer);
-
-      }
+      delete_site(plus_buffer);
+      delete_site(minus_buffer);
     }
 
   }
-  sites_file.close();
   write_statistics(args.statistics_file, statistics);
 }
 
-void parse_mpileup_line(std::array<char, buffer_size> & buffer, Site& plus_site, Site& minus_site) {
-  ParsingState state = ParsingState::SEQID;
+bool parse_mpileup_line(std::array<char, buffer_size>& buffer, Site& plus_site, Site& minus_site, State& state) {
   int i = 0;
   char ch;
-  int pos_start = 0;
-  int pos_end = 0;
 
-  int n_plus = 0;
-  int k_plus = 0;
-  int n_minus = 0;
-  int k_minus = 0;
+  int pos_start = -1;
+  int cov_start = -1;
 
-  CoverageState cov_state = CoverageState::NONE;
-  bool done = false;
-
-  while (!done && i < buffer_size) {
+  while (state.parsing_state != ParsingState::DONE && i < buffer_size) {
     ch = buffer[i];
-    switch (state) {
+    switch (state.parsing_state) {
       case ParsingState::SEQID:
         if (ch == '\t') {
           pos_start = i + 1;
-          state = ParsingState::POSITION;
+          state.parsing_state = ParsingState::POSITION;
         };
         break;
       case ParsingState::POSITION:
         if (ch == '\t') {
-          pos_end = i - 1;
-          state = ParsingState::NUCLEOTIDE;
+          int pos_end = i - 1;
+          int pos = extract_integer(buffer.data(), pos_start, pos_end);
+          plus_site.pos = pos - 1;
+          minus_site.pos = pos + 1;
+          state.parsing_state = ParsingState::NUCLEOTIDE;
         };
         break;
       case ParsingState::NUCLEOTIDE:
         // we do not care
-        i = i + 2;
-        state = ParsingState::COVERAGE;
+        cov_start = i + 2;
+        i = cov_start;
+        state.parsing_state = ParsingState::COVERAGE;
         break;
       case ParsingState::COVERAGE:
         if (ch == '\t') {
-          state = ParsingState::COVERAGE_STRING;
+          state.parsing_state = ParsingState::COVERAGE_STRING;
+          int cov_end = i - 1;
+          state.remaining_coverage = extract_integer(buffer.data(), cov_start, cov_end);
         }
         break;
       case ParsingState::COVERAGE_STRING:
         if (ch == '\t') {
-          done = true;
+          state.parsing_state = ParsingState::DONE;
+          break;
         }
         switch (ch) {
           case '^':
             i++; // always comes as ^~
-            cov_state = CoverageState::BEGIN;
+            state.coverage_state = CoverageState::BEGIN;
             break;
           case 'A':
           case 'C':
           case 'G':
           case 'T':
           case '.':
-            if (cov_state == CoverageState::BEGIN) {
-              k_plus++;
+            if (state.coverage_state == CoverageState::BEGIN) {
+              ++plus_site.k;
             }
-            n_plus++;
-            cov_state = CoverageState::FWD;
+            ++plus_site.n;
+            state.coverage_state = CoverageState::FWD;
             break;
           case '$':
-            if (cov_state == CoverageState::REV) {
-              k_minus += 1;
+            if (state.coverage_state == CoverageState::REV) {
+              ++minus_site.k;
             }
-            cov_state = CoverageState::END;
+            state.coverage_state = CoverageState::END;
             break;
           case 'a':
           case 'c':
           case 'g':
           case 't':
           case ',':
-            n_minus += 1;
-            cov_state = CoverageState::REV;
+            ++minus_site.n;
+            state.coverage_state = CoverageState::REV;
             break;
         }
+        break;
+      case ParsingState::QUALITY_STRING: {
+        int remaining_slots = buffer_size - i;
+        // we need one slot for '\n'
+        if (state.remaining_coverage < remaining_slots) {
+          state.parsing_state = ParsingState::DONE;
+        } else {
+          // all the remaining slots in the buffer are taken by the quality string
+          state.remaining_coverage -= remaining_slots;
+        }
+        break;
+      }
+      case ParsingState::DONE:
+        break;
     }
     i++;
   }
-  int pos_len = pos_end - pos_start + 1;
-  char pos_str[pos_len];
-  strncpy(pos_str,  buffer.cbegin() + pos_start, pos_len);
-  int pos = atoi(pos_str);
 
-  plus_site.k = k_plus;
-  plus_site.n = n_plus;
-  plus_site.pos = pos - 1;
-
-  minus_site.k = k_minus;
-  minus_site.n = n_minus;
-  minus_site.pos = pos + 1;
+  return state.parsing_state != ParsingState::DONE;
 }
 
+// false:
+// true:
+
+inline void reset_site(Site& site) {
+  site.n = 0;
+  site.k = 0;
+}
+
+inline void reset_state(State& state) {
+  state.parsing_state = ParsingState::SEQID;
+  state.coverage_state = CoverageState::NONE;
+}
 
 void inline insert_site(SiteBuffer& buf, Site& factor_site, Site& mock_site) {
   buf.pos.push_back(factor_site.pos);
@@ -351,6 +388,13 @@ void inline write_statistics(std::string& statistics_filename, std::unordered_ma
                     << element.second << std::endl;
   }
   statistics_file.close();
+}
+
+inline int extract_integer(char* array, int start, int end) {
+  int length = end - start + 1;
+  char substr[length];
+  strncpy(substr,  array + start, length);
+  return atoi(substr);
 }
 
 
