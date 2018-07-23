@@ -12,6 +12,7 @@
 #include <unordered_map>
 #include <fstream>
 #include <memory>
+#include <cstring>
 
 struct SiteBuffer {
   std::list<int> pos;
@@ -76,7 +77,7 @@ namespace std {
   };
 }
 
-constexpr int buffer_size = 100;
+constexpr int buffer_size = 100000;
 
 bool parse_mpileup_line(std::array<char, buffer_size>& buffer, Site& plus_site, Site& minus_site, State& state);
 inline void insert_site(SiteBuffer& buf, Site& factor_site, Site& mock_site);
@@ -110,7 +111,12 @@ void gather_mockinbird_data(Arguments& args) {
   int half_window = (args.window_size - 1) / 2;
 
   // at hoc decision - no math behind the heuristic
-  double sigma2 = half_window;
+  double sigma2;
+  if (half_window == 0) {
+    sigma2 = 1;
+  } else {
+    sigma2 = half_window;
+  }
 
   for (int i = 0; i < args.window_size; i++) {
     double weight = exp(- 0.5 * (i - half_window) * (i - half_window) / sigma2);
@@ -205,7 +211,9 @@ bool parse_mpileup_line(std::array<char, buffer_size>& buffer, Site& plus_site, 
   int pos_start = -1;
   int cov_start = -1;
 
-  while (state.parsing_state != ParsingState::DONE && i < buffer_size) {
+  int line_done = false;
+
+  while (!line_done && i < buffer_size) {
     ch = buffer[i];
     switch (state.parsing_state) {
       case ParsingState::SEQID:
@@ -238,7 +246,7 @@ bool parse_mpileup_line(std::array<char, buffer_size>& buffer, Site& plus_site, 
         break;
       case ParsingState::COVERAGE_STRING:
         if (ch == '\t') {
-          state.parsing_state = ParsingState::DONE;
+          state.parsing_state = ParsingState::QUALITY_STRING;
           break;
         }
         switch (ch) {
@@ -274,13 +282,15 @@ bool parse_mpileup_line(std::array<char, buffer_size>& buffer, Site& plus_site, 
         }
         break;
       case ParsingState::QUALITY_STRING: {
-        int remaining_slots = buffer_size - i;
+        int remaining_slots = buffer_size - i - 1; // -1 because last slot in buffer is '\0'
         // we need one slot for '\n'
         if (state.remaining_coverage < remaining_slots) {
           state.parsing_state = ParsingState::DONE;
+          line_done = true;
         } else {
           // all the remaining slots in the buffer are taken by the quality string
           state.remaining_coverage -= remaining_slots;
+          line_done = true;
         }
         break;
       }
@@ -292,9 +302,6 @@ bool parse_mpileup_line(std::array<char, buffer_size>& buffer, Site& plus_site, 
 
   return state.parsing_state != ParsingState::DONE;
 }
-
-// false:
-// true:
 
 inline void reset_site(Site& site) {
   site.n = 0;
@@ -387,18 +394,19 @@ void inline write_statistics(std::string& statistics_filename, std::unordered_ma
     statistics_file << site.n_factor << '\t' << site.k_factor << '\t' << site.n_mock << '\t' << site.k_mock << '\t'
                     << element.second << std::endl;
   }
-  statistics_file.close();
 }
 
 inline int extract_integer(char* array, int start, int end) {
   int length = end - start + 1;
-  char substr[length];
+  char substr[length + 1];
+  substr[length] = '\0';
   strncpy(substr,  array + start, length);
   return atoi(substr);
 }
 
 
 int main(int argc, char *argv[]) {
+
   Arguments args;
   int i = 0;
   args.factor_bam = std::string(argv[++i]);
