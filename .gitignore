@@ -1,6 +1,8 @@
 *.pyc
 *.swp
 .DS_Store
+build_*
+cmake-build*
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
