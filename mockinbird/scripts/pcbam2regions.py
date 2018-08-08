@@ -3,7 +3,7 @@ import sys
 from os import path
 from multiprocessing import Pool
 from tempfile import TemporaryDirectory
-from collections import Counter, namedtuple
+from collections import namedtuple
 from types import SimpleNamespace
 import subprocess
 
@@ -48,11 +48,12 @@ def main():
 
             process_args = {
                 'factor_bam': args.factor_bam,
-                'mock_bam': args.mock_bam,
                 'genome_fasta': args.genome_fasta,
                 'region': region,
                 'window_size': args.window_size,
                 'tmp_dir': args.tmp_dir,
+                'transition_from': args.transition_from,
+                'transition_to': args.transition_to,
             }
             job = pool.apply_async(process_region, args=(region, SimpleNamespace(**process_args)))
             jobs.append(job)
@@ -100,15 +101,17 @@ def process_region(region, args):
 
         subprocess.run([str(token) for token in cmd])
 
-        region_df = pd.read_table(region_file, names=['start', 'end', 'strand'])
-        region_df.loc[:, 'chrom'] = region.seqid
+        region_df = pd.read_table(
+            region_file, header=None, names=['start', 'end', 'strand'],
+            index_col=False)
+        region_df.loc[:, 'seqid'] = region.seqid
         return region_df
 
 
 def write_regions(sites, sites_file):
     sites['name'] = '.'
     sites['score'] = '.'
-    sites[BED_COLS].to_csv(sites_file, mode='a', sep='\t', header=False, index=False)
+    sites.loc[:, BED_COLS].to_csv(sites_file, mode='a', sep='\t', header=False, index=False)
 
 
 if __name__ == '__main__':

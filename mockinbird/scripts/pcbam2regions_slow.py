@@ -57,6 +57,10 @@ def main():
         print('index: %s not found' % fasta_idx)
         sys.exit(1)
 
+    with open(args.regions_of_interest, 'w'):
+        # empty the file
+        pass
+
     regions = generate_regions(fasta_idx)
 
     if args.n_processes == 1:
@@ -171,10 +175,11 @@ def extract_regions_of_interest(region, args):
                 if len(site_buffer) == agg_bp:
                     current_site = site_buffer[len(site_buffer) // 2]
                     prev_site = site_buffer.pop(0)
+                    n_interesting_sites = agg_buffer.n_interesting_sites
                     agg_buffer.n_interesting_sites -= (prev_site.k > 0)
 
-                    if current_site.k >= min_k:
-                        bed_region = BedRegion(seqid, prev_site.pos, current_site.pos + 1, strand)
+                    if current_site.k >= min_k and n_interesting_sites > 1:
+                        bed_region = BedRegion(seqid, prev_site.pos - 1, site.pos, strand)
                         regions_of_interest.append(bed_region)
 
             try:
