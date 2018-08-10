@@ -1,12 +1,8 @@
 import os
 from setuptools import setup, find_packages, Extension
 import versioneer
-
-try:
-    from Cython.Build import cythonize
-    USE_CYTHON = True
-except ImportError:
-    USE_CYTHON = False
+from Cython.Build import cythonize
+USE_CYTHON = True
 
 ext = ".pyx" if USE_CYTHON else ".c"
 module_names = [
@@ -39,7 +35,7 @@ setup(
         'console_scripts': [
 
             # general
-            'mockinbird = mockinbird.scripts.mockinbird:main',
+            'mockinbird = mockinbird.scripts.mockinbird_entry:main',
             'mb-preprocess = mockinbird.scripts.preprocess:main',
             'mb-postprocess = mockinbird.scripts.postprocess:main',
 

@@ -133,11 +133,9 @@ void inline count_site(std::unordered_map<FullSite, size_t>& map, FullSite& site
   }
 }
 
-void inline write_site(std::ofstream& file_stream, FullSite& site, char strand, int threshold) {
-  if (site.k_factor >= threshold) {
+inline void write_site(std::ofstream& file_stream, FullSite& site, char strand) {
     file_stream << site.pos << '\t' << strand << '\t' << site.n_factor << '\t' << site.k_factor << '\t'
                 << site.k_mock << std::endl;
-  }
 }
 
 void inline aggregate_weighted_sum(SiteBuffer& buf, std::vector<double>& weights, FullSite& output) {
@@ -272,23 +270,11 @@ void parse_mpileup_line(ParseData& data, Site& site) {
   }
 
   if (site.plus_strand) {
-    site.n = (
-      state.coverage_counts['.']
-      + state.coverage_counts['A']
-      + state.coverage_counts['C']
-      + state.coverage_counts['G']
-      + state.coverage_counts['T']
-    );
-    site.k = state.coverage_counts['C'];
+    site.k = state.coverage_counts[mut_nuc_plus];
+    site.n = state.coverage_counts['.'] + site.k;
   } else {
-    site.n = (
-      state.coverage_counts[',']
-      + state.coverage_counts['a']
-      + state.coverage_counts['c']
-      + state.coverage_counts['g']
-      + state.coverage_counts['t']
-    );
-    site.k = state.coverage_counts['g'];
+    site.k = state.coverage_counts[mut_nuc_minus];
+    site.n = state.coverage_counts[','] + site.k;
   }
 }
 

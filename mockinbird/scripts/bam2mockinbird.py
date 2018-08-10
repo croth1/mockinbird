@@ -1,13 +1,17 @@
 from argparse import ArgumentParser
+import subprocess
 from subprocess import Popen, PIPE
 import sys
 from os import path
 from multiprocessing import Pool
+from tempfile import TemporaryDirectory
 
 from collections import Counter, defaultdict, namedtuple
+from types import SimpleNamespace
 
-from mockinbird.utils import cy_helpers
 from dataclasses import dataclass
+import pandas as pd
+
 
 @dataclass
 class BufferAgg:
@@ -15,6 +19,9 @@ class BufferAgg:
     k: int
     n_mock: int
     k_mock: int
+
+
+SITE_COLS = ['chrom', 'pos', 'k_factor', 'n_factor', 'k_mock', 'strand']
 
 
 class Region(namedtuple('Region', ['seqid', 'start', 'end'])):
@@ -27,6 +34,14 @@ class Region(namedtuple('Region', ['seqid', 'start', 'end'])):
 class FullSite(namedtuple('Site', ['seqid', 'pos', 'strand', 'n', 'k', 'n_mock', 'k_mock'])):
     __slots__ = ()
 
+    @property
+    def _int_start(self):
+        return self.pos
+
+    @property
+    def _int_end(self):
+        return self.pos
+
 
 class PileupSite(namedtuple('Site', ['seqid', 'pos', 'strand', 'n', 'k'])):
     __slots__ = ()
@@ -34,18 +49,17 @@ class PileupSite(namedtuple('Site', ['seqid', 'pos', 'strand', 'n', 'k'])):
 
 def create_parser():
     parser = ArgumentParser()
-    parser.add_argument('protein_bam')
+    parser.add_argument('factor_bam')
     parser.add_argument('mock_bam')
     parser.add_argument('genome_fasta')
     parser.add_argument('binding_sites')
     parser.add_argument('site_statistics')
+    parser.add_argument('--bed_file')
+    parser.add_argument('--tmp_dir')
     parser.add_argument('--transition_from', choices=['A', 'C', 'G', 'T'], default='T')
     parser.add_argument('--transition_to', choices=['A', 'C', 'G', 'T'], default='C')
     parser.add_argument('--n_processes', type=int)
-    parser.add_argument('--ieclip_model', action='store_true')
     parser.add_argument('--aggregate_bp', type=int, default=1)
-    parser.add_argument('--min_k', type=int, default=1)
-
     return parser
 
 
@@ -63,19 +77,42 @@ def main():
 
     statistics = Counter()
 
-    if args.n_processes == 1:
-        for region in regions:
-            sites, stats = pileup_region(region, args)
-            statistics.update(stats)
-            write_sites(sites, args.binding_sites)
+    bed_regions = defaultdict(list)
+    with TemporaryDirectory(dir=args.tmp_dir) as tmp_dir:
+        seq_bed_template = path.join(tmp_dir, '%s_regions.bed')
+        if args.bed_file:
+            with open(args.bed_file) as bed:
+                for line in bed:
+                    toks = line.split()
+                    bed_regions[toks[0]].append(toks)
 
-    else:
+            for chrom, chrom_regions in bed_regions.items():
+                with open(seq_bed_template % chrom, 'w') as out:
+                    for reg in chrom_regions:
+                        print(*reg, sep='\t', file=out)
+        else:
+            for region in regions:
+                with open(seq_bed_template % region.seqid, 'w') as out:
+                    for strand in '+', '-':
+                        print(region.seqid, region.start - 1, region.end, '.', '.', strand,
+                              sep='\t', file=out)
+
         with Pool(args.n_processes) as pool:
             jobs = []
             for region in regions:
-                pileup_args = (region, args)
+                process_args = {
+                    'factor_bam': args.factor_bam,
+                    'mock_bam': args.mock_bam,
+                    'genome_fasta': args.genome_fasta,
+                    'region': region,
+                    'window_size': args.aggregate_bp,
+                    'tmp_dir': args.tmp_dir,
+                    'bed_file': seq_bed_template % region.seqid,
+                    'ref_nucleotide': args.transition_from,
+                    'mut_nucleotide': args.transition_to,
+                }
 
-                job = pool.apply_async(pileup_region, args=pileup_args)
+                job = pool.apply_async(pileup_region, args=(SimpleNamespace(**process_args),))
                 jobs.append(job)
 
             for job in jobs:
@@ -103,191 +140,48 @@ def write_sites_header(sites_file):
               sep='\t', file=file)
 
 
-def pileup_region(region, args):
-    pileup_cmd = 'samtools mpileup -aa -C 0 -d 1000000000 -q 0 -Q 0 -f %r %r -r %s'
+def pileup_region(args):
+    region = args.region
+    with TemporaryDirectory(dir=args.tmp_dir) as tmp_dir:
+        sites_file = path.join(tmp_dir, region.seqid + '.sites')
+        stats_file = path.join(tmp_dir, region.seqid + '.stats')
 
-    extra_args = {
-        'universal_newlines': True,
-        'stdout': PIPE,
-        'stderr': PIPE,
-        'shell': True
-    }
+        cmd = [
+            'pcbam2mockinbird',
+            args.factor_bam,
+            args.mock_bam,
+            args.genome_fasta,
+            args.bed_file,
+            region,
+            args.window_size,
+            sites_file,
+            stats_file,
+            args.ref_nucleotide,
+            args.mut_nucleotide,
+        ]
 
-    rev_map = {
-        'A': 'T',
-        'C': 'G',
-        'G': 'C',
-        'T': 'A'
-    }
+        subprocess.run([str(token) for token in cmd], check=True)
 
-    plus_transition_from = args.transition_from
-    minus_transition_from = rev_map[args.transition_from]
-    plus_transition_to = args.transition_to
-    minus_transition_to = rev_map[args.transition_to].lower()
+        stats = Counter()
+        with open(stats_file) as stats_handle:
+            for line in stats_handle:
+                n_factor, k_factor, n_mock, k_mock, count = line.split()
+                stats[int(k_factor), int(n_factor), int(k_mock), int(n_mock)] += int(count)
 
-    def extract_transition(line):
-        chrom, pos, ref_nuc, cov, cov_str, qual_str = line.split()
-        if ref_nuc == plus_transition_from:
-            strand = '+'
-        elif ref_nuc == minus_transition_from:
-            strand = '-'
-        else:
-            return None
+        C_SITE_FIELDS = ['pos', 'strand', 'n_factor', 'k_factor', 'k_mock']
+        site_df = pd.read_table(sites_file, header=None, names=C_SITE_FIELDS, index_col=False)
+        site_df['chrom'] = region.seqid
 
-        if cov == '0':
-            n = k = 0
-        else:
-            cov_symb = Counter(cov_str)
-            if ref_nuc == plus_transition_from:
-                k = cov_symb[plus_transition_to]
-                n = k + cov_symb['.']
-            elif ref_nuc == minus_transition_from:
-                k = cov_symb[minus_transition_to]
-                n = k + cov_symb[',']
-        return (chrom, pos, strand, n, k)
+    return site_df, stats
 
-    with Popen([pileup_cmd % (args.genome_fasta, args.protein_bam, region)], **extra_args) as factor_proc,\
-            Popen([pileup_cmd % (args.genome_fasta, args.mock_bam, region)], **extra_args) as mock_proc:
 
-        agg_bp = args.aggregate_bp
-        min_k = args.min_k
-        is_ieclip = args.ieclip_model
-
-        if agg_bp > 1:
-            fwd_buffer = []
-            fwd_agg = BufferAgg(0, 0, 0, 0)
-            rev_buffer = []
-            rev_agg = BufferAgg(0, 0, 0, 0)
-
-        factor = factor_proc.stdout
-        mock = mock_proc.stdout
-
-        sites = []
-        site_statistics = defaultdict(int)
-
-        try:
-            factor_line = next(factor)
-            mock_line = next(mock)
-        except StopIteration:
-            return sites, site_statistics
-
-        while factor_line:
-            extracted_sites = []
-            # PARCLIP mode
-            if not is_ieclip:
-                factor_site = extract_transition(factor_line)
-                # None is a site that cannot be mutated
-                if factor_site:
-                    mock_site = extract_transition(mock_line)
-                    f_seqid, f_pos, f_strand, f_n, f_k = factor_site
-                    m_seqid, m_pos, m_strand, m_n, m_k = mock_site
-                    full_site = FullSite(
-                        f_seqid,
-                        f_pos,
-                        f_strand,
-                        f_n,
-                        f_k,
-                        m_n,
-                        m_k,
-                    )
-                    extracted_sites.append(full_site)
-            else:
-                factor_sites = cy_helpers.extract_ieclip_cy(factor_line)
-                mock_sites = cy_helpers.extract_ieclip_cy(mock_line)
-                for factor_site, mock_site in zip(factor_sites, mock_sites):
-                    f_seqid, f_pos, f_strand, f_n, f_k = factor_site
-                    m_seqid, m_pos, m_strand, m_n, m_k = mock_site
-
-                    full_site = FullSite(
-                        f_seqid,
-                        f_pos,
-                        f_strand,
-                        f_n,
-                        f_k,
-                        m_n,
-                        m_k,
-                    )
-                    extracted_sites.append(full_site)
-
-            output_sites = []
-            for site in extracted_sites:
-                if agg_bp > 1:
-                    # aggregation logic comes here
-                    if site.strand == '+':
-                        site_buffer = fwd_buffer
-
-                    if site.strand:
-                        site_buffer = fwd_buffer
-                        agg_buffer = fwd_agg
-                    else:
-                        site_buffer = rev_buffer
-                        agg_buffer = rev_agg
-
-                    # we cannot make predictions for the first and last agg_bp // 2 sites
-                    if len(site_buffer) == agg_bp - 1:
-
-                        agg_buffer.n += site.n
-                        agg_buffer.k += site.k
-                        agg_buffer.n_mock += site.n_mock
-                        agg_buffer.k_mock += site.k_mock
-
-                        current_pos = site_buffer[len(site_buffer) // 2]
-                        site_buffer.append(site)
-                        prev_site = site_buffer.pop(0)
-
-                        output_site = FullSite(
-                            current_pos.seqid,
-                            current_pos.pos,
-                            current_pos.strand,
-                            n=agg_buffer.n,
-                            k=agg_buffer.k,
-                            n_mock=agg_buffer.n_mock,
-                            k_mock=agg_buffer.k_mock,
-                        )
-                        output_sites.append(output_site)
-
-                        agg_buffer.n -= prev_site.n
-                        agg_buffer.k -= prev_site.k
-                        agg_buffer.n_mock -= prev_site.n_mock
-                        agg_buffer.k_mock -= prev_site.k_mock
-
-                    else:
-                        # buffer not full yet, we cannot aggregate
-                        site_buffer.append(site)
-                        agg_buffer.n += site.n
-                        agg_buffer.k += site.k
-                        agg_buffer.n_mock += site.n_mock
-                        agg_buffer.k_mock += site.k_mock
-
-                else:
-                    output_sites.append(site)
-
-            for site in output_sites:
-                site_statistics[site.k, site.n, site.k_mock, site.n_mock] += 1
-
-                if site.k >= min_k:
-                    sites.append((
-                        site.seqid,
-                        site.pos,
-                        site.k,
-                        site.n,
-                        site.k_mock,
-                        site.strand
-                    ))
-
-            try:
-                factor_line = next(factor)
-                mock_line = next(mock)
-            except StopIteration:
-                break
-
-    return sites, site_statistics
+def write_site_header(site_file):
+    with open(site_file, 'w') as file:
+        print(*SITE_COLS, sep='\t', file=file)
 
 
 def write_sites(sites, sites_file):
-    with open(sites_file, 'a') as handle:
-        for site in sites:
-            print(*site, sep='\t', file=handle)
+    sites.loc[:, SITE_COLS].to_csv(sites_file, mode='a', sep='\t', header=False, index=False)
 
 
 def write_statistics(stats, statistics_file):
