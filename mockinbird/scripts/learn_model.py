@@ -20,12 +20,14 @@ logger = logging.getLogger()
 
 def create_parser():
     parser = argparse.ArgumentParser()
-    parser.add_argument('transition_table')
+    parser.add_argument('site_statistics')
     parser.add_argument('max_mixture_components', type=int, default=3)
     parser.add_argument('bam_stat_json')
     parser.add_argument('out_dir')
     parser.add_argument('--no_global_fit', action='store_true')
     parser.add_argument('--n_iterations', default=100, type=int)
+    parser.add_argument('--dump_data', action='store_true')
+    parser.add_argument('--max_coverage', type=float, default=500)
     return parser
 
 
@@ -43,8 +45,16 @@ def plot_fit(x, x_weights, w, a, title, file_name, out_dir, max_x=None):
     fit = [geom_distr(k, w, a) for k in range(max_x + 1)]
     fit = np.array(fit)
     fig, ax = plt.subplots()
-    ax.hist(x, weights=x_weights, log=True, bins=bins, normed=True, alpha=0.5)
+
+    subset_weights = x_weights[x <= max_x]
+    eta = subset_weights.sum() / x_weights.sum()
+    values, edges = np.histogram(x[x <= max_x], bins=bins, weights=subset_weights,
+                                 density=True)
+    height = values * eta
+
+    ax.bar(x=edges[:-1], width=np.diff(edges), height=height, align='edge', alpha=0.5)
     ax.plot(fit, color='red')
+    ax.set_yscale("log", nonposy='clip')
     if max_x:
         ax.set_xlim((0, max_x))
     fig.suptitle(title, fontsize=18)
@@ -64,7 +74,7 @@ def geom_mm_fit_fast(x, x_counts, n_components, n_iter=100):
     p_max = 1 - q_max
 
     p_initial = [p_mean, p_mean + 0.05 * p_mean]
-    for m in range(3, n_components):
+    for m in range(2, n_components):
         p_initial.append(p_max + 0.01 * m * p_max)
         weights = np.hstack((weights, [0.0001]))
         weights /= np.sum(weights)
@@ -90,8 +100,9 @@ def main():
     with open(args.bam_stat_json) as bam_json:
         bam_stat = json.load(bam_json)
 
-    mock_table = pd.read_table(args.transition_table,
+    mock_table = pd.read_table(args.site_statistics,
                                usecols=['n_mock', 'k_mock', 'count'])
+    mock_table = mock_table.query('n_mock < %s' % args.max_coverage)
     mock_table = mock_table.groupby(['n_mock', 'k_mock']).agg({'count': sum}).reset_index()
 
     k_collapsed = mock_table.groupby('k_mock').agg({'count': sum}).reset_index()
@@ -101,6 +112,22 @@ def main():
     n_collapsed = mock_table.groupby('n_mock').agg({'count': sum}).reset_index()
     n_vals = n_collapsed.n_mock
     n_counts = n_collapsed['count']
+
+    if args.dump_data:
+        n_file = os.path.join(args.out_dir, 'n_dump.tab')
+        pd.DataFrame({
+            'n': n_vals,
+            'count': n_counts,
+        }).to_csv(n_file, sep='\t', index=False)
+
+        k_file = os.path.join(args.out_dir, 'k_dump.tab')
+        pd.DataFrame({
+            'k': k_vals,
+            'count': k_counts,
+        }).to_csv(k_file, sep='\t', index=False)
+
+        kn_file = os.path.join(args.out_dir, 'kn_dump.tab')
+        mock_table.to_csv(kn_file, sep='\t', index=False)
 
     coverage = bam_stat['total_coverage']
 
@@ -184,6 +211,7 @@ def fast_geom_mm_fit(x, p_init, pi_init, n_iter=250, weights=None):
     for i in range(n_iter):
         # calculate the responsibilities
         for k in range(d):
+            print('pi:', pi, 'p:', p)
             r_matrix[k, :] = np.log(pi[k]) + (x_new - 1) * np.log((1 - p[k])) + np.log(p[k])
             #r_matrix[k, :] = pi[k] * (1 - p[k]) ** (x_new - 1) * p[k]
         col_logexp_sum = logsumexp(r_matrix, axis=0)
