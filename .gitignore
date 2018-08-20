@@ -3,6 +3,7 @@
 .DS_Store
 build_*
 cmake-build*
+mockinbird/**/*.c
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

@@ -27,7 +27,7 @@ def create_parser():
     parser.add_argument('--no_global_fit', action='store_true')
     parser.add_argument('--n_iterations', default=100, type=int)
     parser.add_argument('--dump_data', action='store_true')
-    parser.add_argument('--max_coverage', type=float, default=500)
+    parser.add_argument('--max_coverage', type=float, default=np.inf)
     return parser
 
 
@@ -81,7 +81,8 @@ def geom_mm_fit_fast(x, x_counts, n_components, n_iter=100):
 
     ps, weights = fast_geom_mm_fit(x, p_initial, weights, n_iter=n_iter, weights=x_counts)
     w_m = np.array(weights)
-    g_m = np.array([1 - p for p in ps])
+    EPSILON = 1e-30
+    g_m = np.array([1 - p + p*EPSILON for p in ps])
     g_m = (1 - g_m) / g_m
     return w_m, g_m
 
@@ -206,13 +207,16 @@ def fast_geom_mm_fit(x, p_init, pi_init, n_iter=250, weights=None):
     x_agg = np.bincount(x + 1, weights)[1:]
     x_new = np.arange(len(x_agg)) + 1
 
+
+    EPSILON=1e-30
+
     n, d = len(x_new), len(p)
     r_matrix = np.zeros((d, n))
     for i in range(n_iter):
         # calculate the responsibilities
         for k in range(d):
             print('pi:', pi, 'p:', p)
-            r_matrix[k, :] = np.log(pi[k]) + (x_new - 1) * np.log((1 - p[k])) + np.log(p[k])
+            r_matrix[k, :] = np.log(pi[k]) + (x_new - 1) * np.log((1 - p[k] + p[k]*EPSILON)) + np.log(p[k])
             #r_matrix[k, :] = pi[k] * (1 - p[k]) ** (x_new - 1) * p[k]
         col_logexp_sum = logsumexp(r_matrix, axis=0)
         r_matrix = np.exp(r_matrix - col_logexp_sum)
